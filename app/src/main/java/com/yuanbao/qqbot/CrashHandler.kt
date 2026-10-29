@@ -7,31 +7,33 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 崩溃捕获：App 闪退时把完整堆栈写到文件，不用连电脑抓 logcat。
- * 落盘位置（按可写性依次尝试）：
- *   /sdcard/Download/qqbot-crash.txt
- *   filesDir/crash.txt
+ * 崩溃捕获：闪退时把完整堆栈写到文件，不用连电脑抓 logcat。
+ * 落盘位置（按可写性依次尝试）：/sdcard/Download/qqbot-crash.txt → filesDir/crash.txt
+ *
+ * 自包含：不依赖任何 Application 子类，ctx 由 MainActivity / DeployService 设置。
  */
 object CrashHandler {
 
-    private var dir: File? = null
+    @Volatile
+    var ctxRef: Context? = null
 
-    fun install(ctx: Context) {
-        dir = pickDir(ctx)
+    private fun dir(): File {
+        val c = ctxRef
+        val sd = File("/sdcard/Download")
+        if (sd.isDirectory && sd.canWrite()) return sd
+        return c?.filesDir ?: File("/sdcard/Download")
+    }
+
+    fun file(): File = File(dir(), "qqbot-crash.txt")
+
+    fun install(c: Context) {
+        ctxRef = c.applicationContext
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             try { save(t, e) } catch (_: Throwable) {}
             prev?.uncaughtException(t, e)
         }
     }
-
-    private fun pickDir(ctx: Context): File {
-        val sd = File("/sdcard/Download")
-        if (sd.isDirectory && sd.canWrite()) return sd
-        return ctx.filesDir
-    }
-
-    fun file(): File = File(dir ?: File("/sdcard/Download"), "qqbot-crash.txt")
 
     private fun save(t: Thread, e: Throwable) {
         val f = file()
@@ -53,11 +55,14 @@ object CrashHandler {
             c = c.cause
         }
         sb.appendLine()
-        sb.appendLine("--- 环境 ---")
-        try {
-            sb.appendLine("proot: ${Proot.prootBin(QQBotApp.ctx).absolutePath} 存在=${Proot.ready(QQBotApp.ctx)}")
-            sb.appendLine("rootfs: ${Proot.rootfs(QQBotApp.ctx).absolutePath} 存在=${File(Proot.rootfs(QQBotApp.ctx), "bin/bash").exists()}")
-        } catch (_: Throwable) {}
+        val c2 = ctxRef
+        if (c2 != null) {
+            sb.appendLine("--- 环境 ---")
+            try {
+                sb.appendLine("proot: ${Proot.prootBin(c2).absolutePath} 存在=${Proot.ready(c2)}")
+                sb.appendLine("rootfs: ${Proot.rootfs(c2).absolutePath} bash=${File(Proot.rootfs(c2), "bin/bash").exists()}")
+            } catch (_: Throwable) {}
+        }
         sb.appendLine()
         sb.appendLine("--- 最近日志 ---")
         sb.appendLine(LogBus.text().takeLast(4000))
@@ -65,7 +70,7 @@ object CrashHandler {
         f.appendText(sb.toString())
     }
 
-    /** 手动记录一条（比如某个步骤失败） */
+    /** 手动记录一条 */
     fun record(msg: String, e: Throwable? = null) {
         try {
             val sb = StringBuilder()

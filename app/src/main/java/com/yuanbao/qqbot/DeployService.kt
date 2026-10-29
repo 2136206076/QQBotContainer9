@@ -41,6 +41,7 @@ class DeployService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        CrashHandler.install(this)
         try {
             val nm = getSystemService(NotificationManager::class.java)
             if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(CH) == null) {

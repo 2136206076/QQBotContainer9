@@ -186,27 +186,27 @@ object Installer {
     }
 
     private fun installFromSource(ctx: Context, src: String): Boolean {
+        // 全程用 Kotlin 插值，脚本里不再出现 bash 变量，避免 $ 被当成模板
+        val pkg = if (src.startsWith("http")) "/tmp/qq.pkg" else src
+        val dl  = if (src.startsWith("http"))
+            "curl -sL -o '$pkg' '$src' || { echo '下载失败'; exit 1; }" else ""
         val script = """
-            SRC="$src"
-            [ -z "$SRC" ] && { echo "NO_SOURCE"; exit 2; }
+            set -e
             cd /tmp
-            case "$SRC" in
-              http*) curl -sL -o qq.pkg "$SRC" || { echo "下载失败"; exit 1; }; PKG=/tmp/qq.pkg ;;
-              *)     PKG=$SRC ;;
-            esac
-            [ -f "${'$'}PKG" ] || { echo "文件不存在: ${'$'}PKG"; exit 1; }
+            $dl
+            [ -f '$pkg' ] || { echo "文件不存在: $pkg"; exit 1; }
             mkdir -p /opt
-            case "${'$'}PKG" in
-              *.deb)      dpkg -i "${'$'}PKG" 2>&1 | tail -3 || apt-get install -y -f 2>&1 | tail -3 ;;
-              *.tar.gz|*.tgz) tar xzf "${'$'}PKG" -C /opt ;;
-              *.tar.xz)   tar xJf "${'$'}PKG" -C /opt ;;
-              *)          echo "不认识的包格式: ${'$'}PKG"; exit 1 ;;
+            case '$pkg' in
+              *.deb)           dpkg -i '$pkg' 2>&1 | tail -3 || apt-get install -y -f 2>&1 | tail -3 ;;
+              *.tar.gz|*.tgz)  tar xzf '$pkg' -C /opt ;;
+              *.tar.xz)        tar xJf '$pkg' -C /opt ;;
+              *)               echo "不认识的包格式: $pkg"; exit 1 ;;
             esac
             chmod +x /opt/QQ/qq /opt/QQ/chrome-sandbox 2>/dev/null
             echo "QQ: $(python3 -c "import json;print(json.load(open('/opt/QQ/resources/app/package.json'))['version'])" 2>/dev/null)"
         """.trimIndent()
         val rc = Proot.run(ctx, script, tag = "qq")
-        if (rc == 2) LogBus.log("✗ 没给 QQ 包：请填 URL 或 /sdcard/Download/xxx.deb 的路径")
+        if (rc != 0) LogBus.log("✗ QQ 安装失败($rc)。请确认包是 3.2.32 arm64 的 deb/tar.gz")
         return rc == 0
     }
 

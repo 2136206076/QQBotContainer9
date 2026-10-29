@@ -22,6 +22,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
         setContentView(R.layout.activity_main)
+        CrashHandler.install(this)
         tvLog = findViewById(R.id.tvLog)
         etQQ = findViewById(R.id.etQQ)
 
