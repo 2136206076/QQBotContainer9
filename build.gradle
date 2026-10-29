@@ -1,0 +1,19 @@
+buildscript {
+    ext.agp_version = '8.1.4'
+    ext.kotlin_version = '1.9.22'
+}
+plugins {
+    id 'com.android.application' version '8.1.4' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+}
+
+// 构建前自动下载 proot 二进制（Termux 官方 deb 拆包）
+// 手动执行：./gradlew fetchProot    跳过：./gradlew assembleDebug -x fetchProot
+tasks.register('fetchProot', Exec) {
+    workingDir rootProject.projectDir
+    // 需要 python3；没装或网络不通时手动跑：python3 tools/fetch-proot.py
+    commandLine 'python3', 'tools/fetch-proot.py'
+    onlyIf { !file('app/src/main/jniLibs/arm64-v8a/libproot.so').exists() || gradle.startParameter.taskNames.any { it.contains('fetchProot') } }
+    // 网络不可用时不要卡死构建，先放行（App 会在运行时提示缺 proot）
+    ignoreExitValue = true
+}

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <EditText
+        android:id="@+id/etQQ"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="QQ 3.2.32-52194 的 deb/tar.gz：填 URL 或 /sdcard/Download/xxx.deb"
+        android:inputType="textUri"
+        android:textSize="12sp" />
+
+    <Button
+        android:id="@+id/btnDeploy"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="一键部署"
+        android:textStyle="bold" />
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+        <Button android:id="@+id/btnStart" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="启动" />
+        <Button android:id="@+id/btnStop" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="停止" />
+    </LinearLayout>
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+        <Button android:id="@+id/btnStatus" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="状态" />
+        <Button android:id="@+id/btnVer" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="版本体检" />
+    </LinearLayout>
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+        <Button android:id="@+id/btnDiag" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="hook 诊断" />
+        <Button android:id="@+id/btnKeep" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="保活指引" />
+    </LinearLayout>
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+        <Button android:id="@+id/btnConsole" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="控制台" />
+        <Button android:id="@+id/btnVnc" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="扫码登录" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/btnCrash"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="查看崩溃日志"
+        android:textSize="12sp" />
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="8dp"
+        android:background="#111111">
+
+        <TextView
+            android:id="@+id/tvLog"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:textColor="#d0ffd0"
+            android:textSize="10sp"
+            android:typeface="monospace" />
+    </HorizontalScrollView>
+
+</LinearLayout>

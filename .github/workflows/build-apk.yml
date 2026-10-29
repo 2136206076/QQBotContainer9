@@ -1,0 +1,66 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04          # 钉死 24.04：ubuntu-latest 会在 11 月切到 26.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 不用第三方 setup-android action（已停维护，在新 runner 上会崩）。
+      # runner 自带 ANDROID_HOME；没有就用官方 cmdline-tools 装一份。
+      - name: 安装 Android SDK（platform + build-tools）
+        run: |
+          set -e
+          # runner 一般自带 ANDROID_HOME=/usr/local/lib/android/sdk，但它的
+          # cmdline-tools 目录可能是 latest 也可能是 16.0 这样的版本号，要自适应找
+          export ANDROID_HOME=${ANDROID_HOME:-$HOME/android-sdk}
+          if [ ! -d "$ANDROID_HOME/cmdline-tools" ] || \
+             [ -z "$(ls -A "$ANDROID_HOME/cmdline-tools" 2>/dev/null)" ]; then
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            curl -sL -o /tmp/cmd.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q -o /tmp/cmd.zip -d /tmp
+            rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+            mv /tmp/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          SDKMGR=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          [ -n "$SDKMGR" ] || { echo "✗ 找不到 sdkmanager"; ls -R "$ANDROID_HOME/cmdline-tools" | head -20; exit 1; }
+          echo "· sdkmanager = $SDKMGR"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+          "$SDKMGR" --install "platforms;android-34" "build-tools;34.0.0" 2>&1 | tail -8
+          echo "✓ SDK 就绪：$ANDROID_HOME"
+
+      - name: 准备 proot 二进制（可失败）
+        continue-on-error: true     # 下不到也不阻断，App 会提示手动补
+        run: python3 tools/fetch-proot.py
+
+      # 仓库里没有 gradle wrapper（jar 是二进制没法凭空生成），直接装 Gradle
+      - name: 安装 Gradle 8.2
+        run: |
+          curl -sL -o /tmp/g.zip https://services.gradle.org/distributions/gradle-8.2-bin.zip
+          unzip -q /tmp/g.zip -d /opt
+          chmod +x /opt/gradle-8.2/bin/gradle
+          echo "/opt/gradle-8.2/bin" >> "$GITHUB_PATH"
+
+      - name: 编译 debug APK
+        run: gradle assembleDebug --stacktrace --no-daemon
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: QQBotContainer-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

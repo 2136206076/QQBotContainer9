@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">QQ 机器人容器</string>
+    <style name="AppTheme" parent="Theme.MaterialComponents.DayNight.DarkActionBar" />
+</resources>
