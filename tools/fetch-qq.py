@@ -84,7 +84,10 @@ def find_asset(build=None):
             n = a["name"]
             if not (n.startswith("QQ_3.2.32") and "arm64" in n and n.endswith(".deb")):
                 continue
-            if build and build not in n:
+            # 文件名是日期码（如 260812），内部版本 52194 不一定出现在文件名里
+            if build and build not in n and build not in rel.get("tag_name", "") and build not in rel.get("name", ""):
+                if best is None:
+                    best = (rel, a)
                 continue
             if best is None or rel.get("published_at", "") > best[0].get("published_at", ""):
                 best = (rel, a)

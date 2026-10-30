@@ -143,7 +143,7 @@ class DeployService : Service() {
 
         LogBus.log("[7/9] 装 Linux 版 QQ（必须是 3.2.32-52194）")
         if (!Installer.installQQ(this, qqSrc)) {
-            LogBus.log("⚠ QQ 没装好。把 3.2.32-52194 的 deb/tar.gz 放到手机，在上方填路径或 URL 后重跑部署")
+            LogBus.log("⚠ QQ 没装好。留空会自动下；也可填本地 deb 路径或直链后重跑部署")
         }
 
         LogBus.log("[8/9] 打补丁 / 建路径别名 / 冻结热更新")

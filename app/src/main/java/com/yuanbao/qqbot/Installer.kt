@@ -27,6 +27,13 @@ object Installer {
         }
     }
 
+    private fun isDeb(f: File): Boolean {
+        if (!f.exists() || f.length() < 8) return false
+        val magic = ByteArray(8)
+        f.inputStream().use { it.read(magic) }
+        return magic.contentEquals("!<arch>\n".toByteArray())
+    }
+
     fun download(url: String, out: File, onProgress: (Long, Long) -> Unit) {
         out.parentFile?.mkdirs()
         var current: String = url
@@ -36,7 +43,7 @@ object Installer {
             conn.instanceFollowRedirects = false
             conn.connectTimeout = 20_000
             conn.readTimeout = 60_000
-            conn.setRequestProperty("User-Agent", "QQBotContainer/1.0")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0")
             conn.connect()
             val code = conn.responseCode
             if (code in 300..399) {
@@ -208,14 +215,34 @@ object Installer {
     }
 
     fun autoDownloadQQ(ctx: Context): Boolean {
-        LogBus.log("↓ 尝试自动下载 QQ 3.2.32 arm64（GitHub 归档源）…")
-        val rc = Proot.run(ctx, """
-            cd /tmp
-            python3 /opt/qqstack/tools/fetch-qq.py --out /tmp/QQ.deb --build 52194 2>&1 | tail -20
-            [ -s /tmp/QQ.deb ] || { echo "下载失败"; exit 1; }
-            echo "下载完成: ${'$'}(du -h /tmp/QQ.deb | cut -f1)"
-        """.trimIndent(), tag = "qqdl")
-        return rc == 0
+        val dest = File(Proot.rootfs(ctx), "tmp/QQ.deb")
+        dest.parentFile?.mkdirs()
+        if (dest.isFile && dest.length() > 10_000_000 && isDeb(dest)) {
+            LogBus.log("· 已有 /tmp/QQ.deb（${dest.length() / 1024 / 1024}MB），跳过下载")
+            return true
+        }
+        LogBus.log("↓ 未填路径/链接，自动下载 QQ 3.2.32 arm64（约 200MB）")
+        for (url in Cfg.QQ_URLS) {
+            LogBus.log("↓ 尝试 $url")
+            try {
+                download(url, dest) { cur, total ->
+                    if (total > 0) {
+                        val pct = cur * 100 / total
+                        if (pct % 10 == 0L) LogBus.log("↓ QQ ${pct}%")
+                    }
+                }
+                if (dest.length() > 10_000_000 && isDeb(dest)) {
+                    LogBus.log("✓ 下载完成 ${dest.length() / 1024 / 1024}MB")
+                    return true
+                }
+                LogBus.log("· 下到的不像 deb（${dest.length()} 字节），换源")
+            } catch (e: Throwable) {
+                LogBus.log("· 失败：${e.javaClass.simpleName}: ${e.message}")
+            }
+            if (dest.exists()) dest.delete()
+        }
+        LogBus.log("✗ 内置源都下不到。可填本地 deb 路径或直链后重试")
+        return false
     }
 
     fun installQQ(ctx: Context, source: String): Boolean {

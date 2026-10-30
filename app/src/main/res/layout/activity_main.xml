@@ -9,7 +9,7 @@
         android:id="@+id/etQQ"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="QQ 3.2.32-52194：URL 或 /sdcard/Download/xxx.deb"
+        android:hint="留空=自动下载 QQ 3.2.32；也可填 URL 或 /sdcard/...deb"
         android:inputType="textUri"
         android:minHeight="40dp"
         android:textSize="12sp" />

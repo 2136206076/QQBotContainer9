@@ -57,19 +57,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnDeploy).setOnClickListener {
             val src = etQQ.text.toString().trim()
             if (src.isEmpty()) {
-                AlertDialog.Builder(this)
-                    .setTitle("QQ 从哪来？")
-                    .setMessage(
-                        "留空即可 —— App 会自动从 GitHub 上的 QQ 安装包归档仓库下载\n" +
-                        "3.2.32 arm64（约 205MB，不走 QQ 官方 CDN）。\n\n" +
-                        "如果自动下载失败（网络不通），再手动：\n" +
-                        "1) 把 QQ_3.2.32_*_arm64_01.deb 放到手机 Download\n" +
-                        "2) 这里填 /sdcard/Download/QQ.deb（也认 /storage/emulated/0/...）\n" +
-                        "3) 或填一个能直下的 URL"
-                    )
-                    .setPositiveButton("留空继续") { _, _ -> fire(DeployService.DEPLOY, "") }
-                    .setNegativeButton("取消", null)
-                    .show()
+                fire(DeployService.DEPLOY, "")
             } else {
                 if (!ensureStorageForLocalPath(src)) return@setOnClickListener
                 fire(DeployService.DEPLOY, src)
@@ -129,7 +117,7 @@ class MainActivity : AppCompatActivity() {
             LogBus.log("⚠ 这个 APK 里没打包 proot：构建前请先执行 python3 tools/fetch-proot.py")
         } else {
             LogBus.log("· proot 就绪：${Proot.prootBin(this).absolutePath}")
-            LogBus.log("· 点「一键部署」开始；已部署过就直接点「启动」")
+            LogBus.log("· 点「一键部署」开始；路径留空会自动下载 QQ 3.2.32 arm64")
         }
     }
 
