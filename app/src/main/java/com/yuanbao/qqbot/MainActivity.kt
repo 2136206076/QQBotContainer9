@@ -63,8 +63,8 @@ class MainActivity : AppCompatActivity() {
                         "留空即可 —— App 会自动从 GitHub 上的 QQ 安装包归档仓库下载\n" +
                         "3.2.32 arm64（约 205MB，不走 QQ 官方 CDN）。\n\n" +
                         "如果自动下载失败（网络不通），再手动：\n" +
-                        "1) 把 QQ_3.2.32_*_arm64_01.deb 放到手机\n" +
-                        "2) 这里填 /sdcard/Download/QQ.deb\n" +
+                        "1) 把 QQ_3.2.32_*_arm64_01.deb 放到手机 Download\n" +
+                        "2) 这里填 /sdcard/Download/QQ.deb（也认 /storage/emulated/0/...）\n" +
                         "3) 或填一个能直下的 URL"
                     )
                     .setPositiveButton("留空继续") { _, _ -> fire(DeployService.DEPLOY, "") }

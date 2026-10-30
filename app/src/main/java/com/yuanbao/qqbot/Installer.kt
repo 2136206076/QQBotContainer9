@@ -232,10 +232,103 @@ object Installer {
         return false
     }
 
+    private fun hostFileCandidates(src: String): List<File> {
+        val s = src.trim()
+        val name = File(s).name
+        val alts = linkedSetOf(
+            s,
+            s.replace("/storage/emulated/0", "/sdcard"),
+            s.replace("/sdcard", "/storage/emulated/0"),
+            s.replace("/storage/emulated/0", "/storage/self/primary"),
+            s.replace("/storage/self/primary", "/storage/emulated/0"),
+            "/sdcard/Download/$name",
+            "/storage/emulated/0/Download/$name",
+            "/sdcard/Download/DLManager/$name",
+            "/storage/emulated/0/Download/DLManager/$name"
+        )
+        return alts.filter { it.isNotEmpty() }.map { File(it) }
+    }
+
+    private fun findHostPkg(src: String): File? {
+        for (f in hostFileCandidates(src)) {
+            if (f.isFile && f.length() > 1024) return f
+        }
+        return null
+    }
+
+    private fun copyToGuestTmp(ctx: Context, host: File): String {
+        val ext = when {
+            host.name.endsWith(".tar.gz", true) || host.name.endsWith(".tgz", true) -> ".tar.gz"
+            host.name.endsWith(".tar.xz", true) -> ".tar.xz"
+            else -> ".deb"
+        }
+        val dest = File(Proot.rootfs(ctx), "tmp/QQ-install$ext")
+        dest.parentFile?.mkdirs()
+        LogBus.log("· 拷进容器：${host.absolutePath}（${host.length() / 1024 / 1024}MB）")
+        host.inputStream().use { i ->
+            FileOutputStream(dest).use { o ->
+                val buf = ByteArray(1 shl 16)
+                var sum = 0L
+                val total = host.length()
+                var lastPct = -1L
+                while (true) {
+                    val n = i.read(buf)
+                    if (n <= 0) break
+                    o.write(buf, 0, n)
+                    sum += n
+                    if (total > 0) {
+                        val pct = sum * 100 / total
+                        if (pct != lastPct && pct % 10 == 0L) {
+                            lastPct = pct
+                            LogBus.log("· 拷贝 ${pct}%")
+                        }
+                    }
+                }
+            }
+        }
+        if (dest.length() < 1024) throw IllegalStateException("拷贝后文件太小: ${dest.length()}")
+        return "/tmp/QQ-install$ext"
+    }
+
     private fun installFromSource(ctx: Context, src: String): Boolean {
-        val pkg = if (src.startsWith("http")) "/tmp/qq.pkg" else src
-        val dl  = if (src.startsWith("http"))
-            "curl -fL --retry 3 -o '$pkg' '$src' || { echo '下载失败'; exit 1; }" else ""
+        val pkg: String
+        val dl: String
+        if (src.startsWith("http")) {
+            val ext = when {
+                src.contains(".tar.gz") || src.contains(".tgz") -> ".tar.gz"
+                src.contains(".tar.xz") -> ".tar.xz"
+                else -> ".deb"
+            }
+            pkg = "/tmp/QQ-install$ext"
+            val safe = src.replace("'", "'\\''")
+            dl = "curl -fL --retry 3 -o '$pkg' '$safe' || { echo '下载失败'; exit 1; }"
+        } else {
+            val guestRel = src.trim().trimStart('/')
+            val alreadyInGuest = File(Proot.rootfs(ctx), guestRel)
+            if (alreadyInGuest.isFile && alreadyInGuest.length() > 1024) {
+                pkg = if (src.startsWith("/")) src else "/$src"
+                dl = ""
+            } else {
+                val host = findHostPkg(src)
+                if (host == null) {
+                    LogBus.log("✗ 宿主机找不到安装包。试过这些路径：")
+                    hostFileCandidates(src).forEach {
+                        LogBus.log("    ${it.absolutePath}  exists=${it.exists()} size=${if (it.exists()) it.length() else 0}")
+                    }
+                    LogBus.log("  去系统设置打开「所有文件访问」，路径可用 /sdcard/... 或 /storage/emulated/0/...")
+                    return false
+                }
+                try {
+                    pkg = copyToGuestTmp(ctx, host)
+                } catch (e: Throwable) {
+                    CrashHandler.record("copy QQ pkg", e)
+                    LogBus.log("✗ 拷贝失败：${e.javaClass.simpleName}: ${e.message}")
+                    LogBus.log("  去系统设置 → 应用 → 本 App → 打开「所有文件访问」后再试")
+                    return false
+                }
+                dl = ""
+            }
+        }
         val script = """
             set -e
             cd /tmp
@@ -248,6 +341,7 @@ object Installer {
               *.tar.xz)        tar xJf '$pkg' -C /opt ;;
               *)               echo "不认识的包格式: $pkg"; exit 1 ;;
             esac
+            rm -f '$pkg'
             chmod +x /opt/QQ/qq /opt/QQ/chrome-sandbox 2>/dev/null || true
             python3 -c "import json;print('QQ:', json.load(open('/opt/QQ/resources/app/package.json'))['version'])" 2>/dev/null || echo "QQ: 已安装但读不到版本"
             [ -f /opt/QQ/resources/app/package.json ] || { echo "安装后没有 /opt/QQ"; exit 1; }

@@ -71,6 +71,7 @@ object Proot {
             "-r", r.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-b", "/sdcard",
+            "-b", "/storage",
             "-b", "${shmDir(ctx).absolutePath}:/dev/shm",
             "-w", "/root",
             "/usr/bin/env", "-i",
