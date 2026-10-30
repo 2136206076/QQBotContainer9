@@ -69,10 +69,10 @@ object Cfg {
     const val SLWEBUI_PORT = 5099
 
     const val QQ_DEB_NAME = "QQ_3.2.32_260812_arm64_01.deb"
+    const val QQ_RELEASE_TAG = "qq-packages-20260813-1d08f1d4"
     val QQ_URLS = listOf(
-        "https://dldir1v6.qq.com/qqfile/qq/QQNT/Linux/$QQ_DEB_NAME",
-        "https://gh-proxy.com/https://github.com/Rodert/qq-versions/releases/download/Linux-QQ-3.2.32/$QQ_DEB_NAME",
-        "https://ghproxy.net/https://github.com/Rodert/qq-versions/releases/download/Linux-QQ-3.2.32/$QQ_DEB_NAME",
-        "https://github.com/Rodert/qq-versions/releases/download/Linux-QQ-3.2.32/$QQ_DEB_NAME"
+        "https://gh-proxy.com/https://github.com/Rodert/qq-versions/releases/download/$QQ_RELEASE_TAG/$QQ_DEB_NAME",
+        "https://ghproxy.net/https://github.com/Rodert/qq-versions/releases/download/$QQ_RELEASE_TAG/$QQ_DEB_NAME",
+        "https://github.com/Rodert/qq-versions/releases/download/$QQ_RELEASE_TAG/$QQ_DEB_NAME"
     )
 }
