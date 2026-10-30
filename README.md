@@ -126,7 +126,7 @@ app/src/main/
     TarExtractor.kt   自研 tar 解压（硬链接降级为复制，绕开 Android 限制）
     BootReceiver.kt   开机自启
   assets/qqstack/     部署脚本 + patch + slhook.c（运行时拷进 /opt/qqstack）
-  jniLibs/arm64-v8a/  proot 四件套（构建前由 tools/fetch-proot.py 填）
+  jniLibs/arm64-v8a/  proot 四件套（构建前由 python3 tools/fetch-proot.py 填）
 tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 ```
 

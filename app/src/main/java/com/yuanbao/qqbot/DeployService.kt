@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import kotlin.concurrent.thread
 
@@ -39,9 +41,20 @@ class DeployService : Service() {
 
     override fun onBind(i: Intent?): IBinder? = null
 
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onCreate() {
         super.onCreate()
         CrashHandler.install(this)
+        try {
+            val pm = getSystemService(PowerManager::class.java)
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "qqbot:deploy").apply {
+                setReferenceCounted(false)
+                acquire(6 * 60 * 60 * 1000L)
+            }
+        } catch (e: Throwable) {
+            CrashHandler.record("WakeLock 获取失败", e)
+        }
         try {
             val nm = getSystemService(NotificationManager::class.java)
             if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(CH) == null) {
@@ -55,9 +68,12 @@ class DeployService : Service() {
                 .setSmallIcon(android.R.drawable.stat_sys_download)
                 .setOngoing(true)
                 .build()
-            startForeground(1, n)
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(1, n)
+            }
         } catch (e: Throwable) {
-            // 通知权限没给 / 前台服务受限：不要让整个 App 崩掉，降级继续跑
             CrashHandler.record("startForeground 失败（前台服务降级，不影响部署逻辑）", e)
             LogBus.log("⚠ 前台服务启动失败：${e.message}（不影响部署，但更容易被系统回收）")
         }
@@ -74,6 +90,13 @@ class DeployService : Service() {
             } finally { LogBus.log("== 完成：$act ==") }
         }
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        try {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Throwable) {}
+        super.onDestroy()
     }
 
     private fun run(act: String, qqSrc: String) {

@@ -71,14 +71,14 @@ object TarExtractor {
             val out = File(dest, name)
             val mode = octal(buf, 100, 8).toInt() and 511   // 0o777
             when (type) {
-                '5' -> out.mkdirs()
-                '2' -> { out.parentFile?.mkdirs(); symlink(link, out) }      // 符号链接
-                '1' -> { out.parentFile?.mkdirs(); hardlink(File(dest, link.trimStart('/')), out) }
-                '3', '4', '6' -> skipData(`in`, size)                        // 设备节点跳过
+                '5' -> { out.mkdirs(); if (size > 0) skipData(`in`, size) }
+                '2' -> { out.parentFile?.mkdirs(); symlink(link, out); if (size > 0) skipData(`in`, size) }
+                '1' -> { out.parentFile?.mkdirs(); hardlink(File(dest, link.trimStart('/')), out); if (size > 0) skipData(`in`, size) }
+                '3', '4', '6' -> skipData(`in`, size)
                 else -> {
                     out.parentFile?.mkdirs()
+                    var remain = size
                     FileOutputStream(out).use { fos ->
-                        var remain = size
                         val chunk = ByteArray(1 shl 16)
                         while (remain > 0) {
                             val n = `in`.read(chunk, 0, minOf(remain, chunk.size.toLong()).toInt())
@@ -87,8 +87,9 @@ object TarExtractor {
                             remain -= n
                         }
                     }
+                    if (remain > 0) skipBytes(`in`, remain)
                     skipPadding(`in`, size)
-                    if (mode and 73 != 0) chmod(out, mode)   // 0o111: 可执行文件
+                    if (mode and 73 != 0) chmod(out, mode)
                 }
             }
             count++

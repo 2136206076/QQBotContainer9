@@ -6,8 +6,12 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
+import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -18,19 +22,37 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var tvLog: TextView
     private lateinit var etQQ: EditText
+    private lateinit var svLog: ScrollView
+
+    private val logListener: (String) -> Unit = { line ->
+        if (!isDestroyed && ::tvLog.isInitialized) {
+            tvLog.append(line + "\n")
+            val t = tvLog.text
+            if (t.length > 80_000) tvLog.text = t.takeLast(40_000)
+            svLog.post { if (!isDestroyed) svLog.fullScroll(View.FOCUS_DOWN) }
+        }
+    }
 
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
-        setContentView(R.layout.activity_main)
-        CrashHandler.install(this)
+        try {
+            CrashHandler.install(this)
+            setContentView(R.layout.activity_main)
+        } catch (e: Throwable) {
+            CrashHandler.record("MainActivity.setContentView", e)
+            throw e
+        }
         tvLog = findViewById(R.id.tvLog)
         etQQ = findViewById(R.id.etQQ)
+        svLog = findViewById(R.id.svLog)
 
-        askPerms()
+        try { askPerms() } catch (_: Throwable) {}
 
-        LogBus.listen { line ->
-            tvLog.append(line + "\n")
-        }
+        LogBus.listen(logListener)
+        try {
+            val old = LogBus.text()
+            if (old.isNotEmpty()) tvLog.append(old)
+        } catch (_: Throwable) {}
 
         findViewById<Button>(R.id.btnDeploy).setOnClickListener {
             val src = etQQ.text.toString().trim()
@@ -48,7 +70,10 @@ class MainActivity : AppCompatActivity() {
                     .setPositiveButton("留空继续") { _, _ -> fire(DeployService.DEPLOY, "") }
                     .setNegativeButton("取消", null)
                     .show()
-            } else fire(DeployService.DEPLOY, src)
+            } else {
+                if (!ensureStorageForLocalPath(src)) return@setOnClickListener
+                fire(DeployService.DEPLOY, src)
+            }
         }
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { fire(DeployService.START) }
@@ -66,14 +91,22 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnKeep).setOnClickListener { showKeepAlive() }
         findViewById<Button>(R.id.btnCrash).setOnClickListener { showCrash() }
 
-        checkProot()
-        // 上次闪退过就把日志摊开，省得用户去文件里翻
-        val cf = CrashHandler.file()
-        if (cf.exists() && cf.length() > 0) {
-            tvLog.append("\n\n【检测到上次崩溃记录，已存到 ${cf.absolutePath}】\n")
-            tvLog.append(cf.readText().takeLast(2500))
-            tvLog.append("\n")
+        try { checkProot() } catch (e: Throwable) {
+            tvLog.append("proot 检查失败：${e.message}\n")
         }
+        try {
+            val cf = CrashHandler.file()
+            if (cf.exists() && cf.length() > 0) {
+                tvLog.append("\n\n【检测到上次崩溃记录，已存到 ${cf.absolutePath}】\n")
+                tvLog.append(cf.readText().takeLast(2500))
+                tvLog.append("\n")
+            }
+        } catch (_: Throwable) {}
+    }
+
+    override fun onDestroy() {
+        LogBus.unlisten(logListener)
+        super.onDestroy()
     }
 
     private fun showCrash() {
@@ -93,7 +126,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkProot() {
         if (!Proot.ready(this)) {
-            LogBus.log("⚠ 这个 APK 里没打包 proot：构建前请先在电脑上执行 bash tools/fetch-proot.sh")
+            LogBus.log("⚠ 这个 APK 里没打包 proot：构建前请先执行 python3 tools/fetch-proot.py")
         } else {
             LogBus.log("· proot 就绪：${Proot.prootBin(this).absolutePath}")
             LogBus.log("· 点「一键部署」开始；已部署过就直接点「启动」")
@@ -114,6 +147,31 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
             != PackageManager.PERMISSION_GRANTED) need.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         if (need.isNotEmpty()) ActivityCompat.requestPermissions(this, need.toTypedArray(), 1)
+    }
+
+    private fun ensureStorageForLocalPath(src: String): Boolean {
+        if (src.isEmpty() || src.startsWith("http")) return true
+        if (Build.VERSION.SDK_INT < 30) return true
+        if (Environment.isExternalStorageManager()) return true
+        AlertDialog.Builder(this)
+            .setTitle("需要访问本地文件")
+            .setMessage("Android 11+ 读取 /sdcard 上的 QQ 安装包需要「所有文件访问」权限。去系统设置打开后，再点一次「一键部署」。")
+            .setPositiveButton("去设置") { _, _ ->
+                try {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                } catch (_: Exception) {
+                    try { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                    catch (_: Exception) {}
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+        return false
     }
 
     private fun showKeepAlive() {

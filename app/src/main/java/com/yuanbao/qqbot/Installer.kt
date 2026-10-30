@@ -11,7 +11,7 @@ object Installer {
 
     private fun assetCopy(ctx: Context, assetPath: String, dest: File) {
         val list = ctx.assets.list(assetPath)
-        if (list.isNullOrEmpty()) {          // 是文件
+        if (list.isNullOrEmpty()) {
             dest.parentFile?.mkdirs()
             ctx.assets.open(assetPath).use { i -> FileOutputStream(dest).use { o -> i.copyTo(o) } }
             return
@@ -20,31 +20,57 @@ object Installer {
         for (name in list) assetCopy(ctx, if (assetPath.isEmpty()) name else "$assetPath/$name", File(dest, name))
     }
 
-    fun download(url: String, out: File, onProgress: (Long, Long) -> Unit) {
-        out.parentFile?.mkdirs()
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = true
-        conn.connectTimeout = 20_000
-        conn.readTimeout = 60_000
-        conn.connect()
-        val total = conn.contentLengthLong
-        conn.inputStream.use { i ->
-            FileOutputStream(out).use { o ->
-                val buf = ByteArray(1 shl 16)
-                var sum = 0L
-                while (true) {
-                    val n = i.read(buf)
-                    if (n <= 0) break
-                    o.write(buf, 0, n)
-                    sum += n
-                    onProgress(sum, total)
-                }
-            }
+    private fun isGzip(f: File): Boolean {
+        if (!f.exists() || f.length() < 2) return false
+        return f.inputStream().use { i ->
+            i.read() == 0x1f && i.read() == 0x8b
         }
-        conn.disconnect()
     }
 
-    // ---------- 步骤 1：rootfs ----------
+    fun download(url: String, out: File, onProgress: (Long, Long) -> Unit) {
+        out.parentFile?.mkdirs()
+        var current: String = url
+        var redirects = 0
+        while (redirects < 8) {
+            val conn = URL(current).openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = false
+            conn.connectTimeout = 20_000
+            conn.readTimeout = 60_000
+            conn.setRequestProperty("User-Agent", "QQBotContainer/1.0")
+            conn.connect()
+            val code = conn.responseCode
+            if (code in 300..399) {
+                val loc = conn.getHeaderField("Location")
+                conn.disconnect()
+                if (loc.isNullOrEmpty()) throw IllegalStateException("重定向没有 Location: $code")
+                current = if (loc.startsWith("http")) loc else URL(URL(current), loc).toString()
+                redirects++
+                continue
+            }
+            if (code !in 200..299) {
+                conn.disconnect()
+                throw IllegalStateException("HTTP $code $current")
+            }
+            val total = conn.contentLengthLong
+            conn.inputStream.use { i ->
+                FileOutputStream(out).use { o ->
+                    val buf = ByteArray(1 shl 16)
+                    var sum = 0L
+                    while (true) {
+                        val n = i.read(buf)
+                        if (n <= 0) break
+                        o.write(buf, 0, n)
+                        sum += n
+                        onProgress(sum, total)
+                    }
+                }
+            }
+            conn.disconnect()
+            return
+        }
+        throw IllegalStateException("重定向次数过多: $url")
+    }
+
     fun ensureRootfs(ctx: Context, url: String): Boolean {
         return try { ensureRootfsInner(ctx, url) }
         catch (e: Throwable) {
@@ -63,35 +89,47 @@ object Installer {
         val gz = File(ctx.filesDir, "rootfs.tar.gz")
         if (!gz.exists() || gz.length() < 1_000_000) {
             LogBus.log("↓ 下载 Ubuntu Base（约 28MB）…")
-            download(url, gz) { cur, total ->
-                if (total > 0) {
-                    val pct = cur * 100 / total
-                    if (pct % 10 == 0L) LogBus.log("↓ 下载 ${pct}%")
+            try {
+                download(url, gz) { cur, total ->
+                    if (total > 0) {
+                        val pct = cur * 100 / total
+                        if (pct % 10 == 0L) LogBus.log("↓ 下载 ${pct}%")
+                    }
                 }
+            } catch (e: Throwable) {
+                if (gz.exists()) gz.delete()
+                throw e
+            }
+            if (gz.length() < 1_000_000 || !isGzip(gz)) {
+                LogBus.log("✗ 下到的文件不像 gzip（${gz.length()} 字节），丢掉重试")
+                gz.delete()
+                return false
             }
         }
         LogBus.log("⇱ 解压 rootfs（约 1~2 分钟）…")
         r.mkdirs()
         val n = TarExtractor.extractGz(gz, r) { if (it % 2000 == 0L) LogBus.log("⇱ 已解出 $it 项") }
         LogBus.log("✓ rootfs 解压完成，共 $n 项")
+        if (!File(r, "bin/bash").exists()) {
+            LogBus.log("✗ 解压后没有 /bin/bash，包可能下坏了，下次会重下")
+            if (gz.exists()) gz.delete()
+            return false
+        }
         gz.delete()
-        // 挂载点目录
         for (d in listOf("proc", "sys", "dev", "dev/pts", "run", "tmp", "var/tmp", "sdcard")) File(r, d).mkdirs()
-        return File(r, "bin/bash").exists()
+        return true
     }
 
-    // ---------- 步骤 2：rootfs 内部的基础文件 ----------
     fun seed(ctx: Context) {
         val r = Proot.rootfs(ctx)
         File(r, "etc/resolv.conf").writeText("nameserver 223.5.5.5\nnameserver 8.8.8.8\n")
         File(r, "etc/hosts").writeText(
             "127.0.0.1 localhost\n::1 localhost\n0.0.0.0 qqpatch.gtimg.cn\n"
         )
-        // apt 装包时别去起服务（容器里没有 init）
         val p = File(r, "usr/sbin/policy-rc.d")
         p.parentFile?.mkdirs()
         p.writeText("#!/bin/sh\nexit 101\n")
-        // ubuntu-base 自带的源常常缺 universe（novnc/websockify 就在 universe 里），直接重写
+        p.setExecutable(true, false)
         File(r, "etc/apt/sources.list").apply {
             parentFile?.mkdirs()
             writeText(
@@ -104,16 +142,15 @@ object Installer {
             parentFile?.mkdirs()
             writeText("APT::Install-Recommends \"false\";\nAPT::Install-Suggests \"false\";\nAcquire::Retries \"3\";\n")
         }
-        LogBus.log("✓ 已写入 resolv.conf / hosts（含热更新屏蔽）/ apt 配置")
+        LogBus.log("✓ 已写入 resolv.conf / hosts（含热更新屏蔽）/ apt 配置（ubuntu-ports）")
     }
 
-    // ---------- 步骤 3：部署脚本进容器 ----------
     fun installScripts(ctx: Context) {
         try {
             val r = Proot.rootfs(ctx)
             val dest = File(r, "opt/qqstack")
             assetCopy(ctx, "qqstack", dest)
-            val rc = Proot.run(ctx, "chmod -R +x /opt/qqstack/scripts /opt/qqstack/patch 2>/dev/null; " +
+            val rc = Proot.run(ctx, "chmod -R +x /opt/qqstack/scripts /opt/qqstack/patch /opt/qqstack/tools /opt/qqstack/bin 2>/dev/null; " +
                     "mkdir -p /opt/qqstack/run /tmp/.X11-unix; echo ok", tag = "seed")
             LogBus.log(if (rc == 0) "✓ 部署脚本已就位 /opt/qqstack" else "✗ 脚本安装失败($rc)")
         } catch (e: Throwable) {
@@ -122,7 +159,6 @@ object Installer {
         }
     }
 
-    // ---------- 步骤 4：系统包 + Node + 编 hook ----------
     fun bootstrap(ctx: Context): Boolean {
         val p = Proot.shell(ctx, "[ -f ${Cfg.BOOTSTRAP_MARK} ] && echo yes || echo no")
         val out = p.inputStream.bufferedReader().readText().trim()
@@ -134,14 +170,14 @@ object Installer {
         return rc == 0
     }
 
-    // ---------- 步骤 5：三大件 ----------
     fun installAgent(ctx: Context): Boolean {
         val ok = Proot.run(ctx, """
             [ -f /opt/qqagent/src/server.js ] && { echo skip; exit 0; }
             mkdir -p /opt && cd /opt
-            git clone --depth 1 ${Cfg.AGENT_GIT} qqagent 2>&1 | tail -3
-            cd /opt/qqagent && npm install --omit=dev 2>&1 | tail -5
-            echo "agent: $(grep -m1 '"version"' package.json || echo '?')"
+            git clone --depth 1 ${Cfg.AGENT_GIT} qqagent 2>&1 | tail -8
+            [ -f /opt/qqagent/src/server.js ] || { echo "clone 失败"; exit 1; }
+            cd /opt/qqagent && npm install --omit=dev 2>&1 | tail -8
+            echo "agent: ${'$'}(grep -m1 '"version"' package.json || echo '?')"
         """.trimIndent(), tag = "agent")
         return ok == 0
     }
@@ -149,32 +185,43 @@ object Installer {
     fun installSnowLuma(ctx: Context): Boolean {
         val ok = Proot.run(ctx, """
             [ -f /opt/snowluma/index.mjs ] && { echo skip; exit 0; }
-            cd /tmp && curl -sL -o sl.tar.gz ${Cfg.SNOWLUMA_URL}
-            mkdir -p /opt/snowluma && tar xzf sl.tar.gz -C /opt/snowluma
-            chmod +x /opt/snowluma/node /opt/snowluma/launcher.sh 2>/dev/null
-            cat /opt/snowluma/release.json 2>/dev/null
-            echo "node: $(/opt/snowluma/node -v 2>/dev/null)"
+            cd /tmp
+            curl -fL --retry 3 -o sl.tar.gz ${Cfg.SNOWLUMA_URL} || { echo "下载失败"; exit 1; }
+            mkdir -p /opt/snowluma /tmp/sl-unpack
+            tar xzf sl.tar.gz -C /tmp/sl-unpack
+            if [ -f /tmp/sl-unpack/index.mjs ]; then
+              cp -a /tmp/sl-unpack/. /opt/snowluma/
+            else
+              inner=${'$'}(find /tmp/sl-unpack -maxdepth 2 -name index.mjs | head -1)
+              if [ -n "${'$'}inner" ]; then
+                cp -a "${'$'}(dirname "${'$'}inner")"/. /opt/snowluma/
+              else
+                cp -a /tmp/sl-unpack/. /opt/snowluma/
+              fi
+            fi
+            chmod +x /opt/snowluma/node /opt/snowluma/launcher.sh 2>/dev/null || true
+            cat /opt/snowluma/release.json 2>/dev/null || true
+            echo "node: ${'$'}(/opt/snowluma/node -v 2>/dev/null)"
+            [ -f /opt/snowluma/index.mjs ] || { echo "解压后没有 index.mjs"; ls -la /opt/snowluma | head; exit 1; }
         """.trimIndent(), tag = "snowluma")
         return ok == 0
     }
 
-    /** 自动下载 QQ：GitHub 上有归档仓库把官方包同步到了 Releases，不走 QQ 的 CDN */
     fun autoDownloadQQ(ctx: Context): Boolean {
         LogBus.log("↓ 尝试自动下载 QQ 3.2.32 arm64（GitHub 归档源）…")
         val rc = Proot.run(ctx, """
             cd /tmp
-            python3 /opt/qqstack/tools/fetch-qq.py --out /tmp/QQ.deb 2>&1 | tail -20
+            python3 /opt/qqstack/tools/fetch-qq.py --out /tmp/QQ.deb --build 52194 2>&1 | tail -20
             [ -s /tmp/QQ.deb ] || { echo "下载失败"; exit 1; }
-            echo "下载完成: $(du -h /tmp/QQ.deb | cut -f1)"
+            echo "下载完成: ${'$'}(du -h /tmp/QQ.deb | cut -f1)"
         """.trimIndent(), tag = "qqdl")
         return rc == 0
     }
 
-    /** QQ 必须是指定的 3.2.32-52194。source 可以是 URL 或 /sdcard/... 的本地路径；留空则自动下载 */
     fun installQQ(ctx: Context, source: String): Boolean {
         if (Proot.run(ctx, "[ -f /opt/QQ/resources/app/package.json ] && exit 0 || exit 9",
                 tag = "qqchk") == 0) {
-            Proot.run(ctx, """echo "已有 QQ: $(python3 -c "import json;print(json.load(open('/opt/QQ/resources/app/package.json'))['version'])" 2>/dev/null)"""", tag = "qq")
+            Proot.run(ctx, "python3 -c \"import json;print('已有 QQ:', json.load(open('/opt/QQ/resources/app/package.json'))['version'])\" 2>/dev/null", tag = "qq")
             return true
         }
         val src = source.trim()
@@ -186,10 +233,9 @@ object Installer {
     }
 
     private fun installFromSource(ctx: Context, src: String): Boolean {
-        // 全程用 Kotlin 插值，脚本里不再出现 bash 变量，避免 $ 被当成模板
         val pkg = if (src.startsWith("http")) "/tmp/qq.pkg" else src
         val dl  = if (src.startsWith("http"))
-            "curl -sL -o '$pkg' '$src' || { echo '下载失败'; exit 1; }" else ""
+            "curl -fL --retry 3 -o '$pkg' '$src' || { echo '下载失败'; exit 1; }" else ""
         val script = """
             set -e
             cd /tmp
@@ -197,13 +243,14 @@ object Installer {
             [ -f '$pkg' ] || { echo "文件不存在: $pkg"; exit 1; }
             mkdir -p /opt
             case '$pkg' in
-              *.deb)           dpkg -i '$pkg' 2>&1 | tail -3 || apt-get install -y -f 2>&1 | tail -3 ;;
+              *.deb)           dpkg -i '$pkg' 2>&1 | tail -8 || true; apt-get install -y -f 2>&1 | tail -8 ;;
               *.tar.gz|*.tgz)  tar xzf '$pkg' -C /opt ;;
               *.tar.xz)        tar xJf '$pkg' -C /opt ;;
               *)               echo "不认识的包格式: $pkg"; exit 1 ;;
             esac
-            chmod +x /opt/QQ/qq /opt/QQ/chrome-sandbox 2>/dev/null
-            echo "QQ: $(python3 -c "import json;print(json.load(open('/opt/QQ/resources/app/package.json'))['version'])" 2>/dev/null)"
+            chmod +x /opt/QQ/qq /opt/QQ/chrome-sandbox 2>/dev/null || true
+            python3 -c "import json;print('QQ:', json.load(open('/opt/QQ/resources/app/package.json'))['version'])" 2>/dev/null || echo "QQ: 已安装但读不到版本"
+            [ -f /opt/QQ/resources/app/package.json ] || { echo "安装后没有 /opt/QQ"; exit 1; }
         """.trimIndent()
         val rc = Proot.run(ctx, script, tag = "qq")
         if (rc != 0) LogBus.log("✗ QQ 安装失败($rc)。请确认包是 3.2.32 arm64 的 deb/tar.gz")
@@ -212,26 +259,24 @@ object Installer {
 
     fun patchAndFinish(ctx: Context) {
         Proot.run(ctx, """
-            # /proc/locks 能读就不打补丁，读不了才打
             if cat /proc/locks >/dev/null 2>&1; then echo "locks: 可读，跳过补丁"; else
               python3 /opt/qqstack/patch/patch_snowluma.py /opt/snowluma/index.mjs 2>&1 | tail -5
               bash /opt/qqstack/scripts/mkfake-locks.sh
             fi
-            # 建路径别名（宿主路径 -> 容器路径），proot 下 hook 靠它找文件
             bash /opt/qqstack/scripts/mkpath-alias.sh 2>&1 | tail -5
-            # 冻热更新
             bash /opt/qqstack/scripts/freeze-hotupdate.sh 2>&1 | tail -3
             touch ${Cfg.DEPLOYED_MARK}
         """.trimIndent(), tag = "patch")
     }
 
-    // ---------- 运行 ----------
     fun start(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/start-all.sh 2>&1", tag = "start")
     fun status(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/status.sh 2>&1", tag = "status")
     fun stop(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/stop-all.sh 2>&1", tag = "stop")
     fun versions(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/versions.sh 2>&1", tag = "ver")
     fun diag(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/slhook-diag.sh 2>&1", tag = "diag")
 
-    fun vncPassword(ctx: Context, pass: String): Int =
-        Proot.run(ctx, "x11vnc -storepasswd '$pass' /opt/qqstack/vncpasswd 2>&1 | tail -2", tag = "vnc")
+    fun vncPassword(ctx: Context, pass: String): Int {
+        val safe = pass.replace("'", "'\\''")
+        return Proot.run(ctx, "x11vnc -storepasswd '$safe' /opt/qqstack/vncpasswd 2>&1 | tail -2", tag = "vnc")
+    }
 }

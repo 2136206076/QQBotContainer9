@@ -10,7 +10,7 @@ import java.util.Locale
  * 崩溃捕获：闪退时把完整堆栈写到文件，不用连电脑抓 logcat。
  * 落盘位置（按可写性依次尝试）：/sdcard/Download/qqbot-crash.txt → filesDir/crash.txt
  *
- * 自包含：不依赖任何 Application 子类，ctx 由 MainActivity / DeployService 设置。
+ * 自包含：ctx 由 Application / MainActivity / DeployService 设置。
  */
 object CrashHandler {
 
@@ -19,24 +19,32 @@ object CrashHandler {
 
     private fun dir(): File {
         val c = ctxRef
-        val sd = File("/sdcard/Download")
-        if (sd.isDirectory && sd.canWrite()) return sd
-        return c?.filesDir ?: File("/sdcard/Download")
+        if (c != null) return c.filesDir
+        return File("/data/local/tmp")
     }
 
-    fun file(): File = File(dir(), "qqbot-crash.txt")
+    fun file(): File = File(dir(), "crash.txt")
 
+    @Synchronized
     fun install(c: Context) {
         ctxRef = c.applicationContext
-        val prev = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            try { save(t, e) } catch (_: Throwable) {}
-            prev?.uncaughtException(t, e)
-        }
+        val cur = Thread.getDefaultUncaughtExceptionHandler()
+        if (cur === handler) return
+        prev = cur
+        Thread.setDefaultUncaughtExceptionHandler(handler)
+    }
+
+    @Volatile
+    private var prev: Thread.UncaughtExceptionHandler? = null
+
+    private val handler = Thread.UncaughtExceptionHandler { t, e ->
+        try { save(t, e) } catch (_: Throwable) {}
+        prev?.uncaughtException(t, e)
     }
 
     private fun save(t: Thread, e: Throwable) {
         val f = file()
+        f.parentFile?.mkdirs()
         val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
         val sb = StringBuilder()
         sb.appendLine("========== 崩溃 $ts ==========")
@@ -70,9 +78,10 @@ object CrashHandler {
         f.appendText(sb.toString())
     }
 
-    /** 手动记录一条 */
     fun record(msg: String, e: Throwable? = null) {
         try {
+            val f = file()
+            f.parentFile?.mkdirs()
             val sb = StringBuilder()
             sb.appendLine("========== ${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())} ==========")
             sb.appendLine(msg)
@@ -80,7 +89,7 @@ object CrashHandler {
                 sb.appendLine("${e.javaClass.name}: ${e.message}")
                 e.stackTrace.take(20).forEach { sb.appendLine("  $it") }
             }
-            file().appendText(sb.toString() + "\n")
+            f.appendText(sb.toString() + "\n")
         } catch (_: Throwable) {}
     }
 }

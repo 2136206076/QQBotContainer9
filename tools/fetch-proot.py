@@ -23,6 +23,7 @@ import sys
 import stat
 import urllib.request
 import gzip
+import lzma
 import tarfile
 
 REPO = "https://packages.termux.dev/apt/termux-main"
@@ -82,6 +83,57 @@ def latest(idx, name):
     return best
 
 
+def decompress_tarball(blob):
+    if blob.startswith(b"\xfd7zXZ"):
+        return lzma.decompress(blob)
+    if blob.startswith(b"\x1f\x8b"):
+        return gzip.decompress(blob)
+    if blob.startswith(b"\x28\xb5\x2f\xfd"):
+        try:
+            import zstandard as zstd
+            return zstd.ZstdDecompressor().decompress(blob)
+        except ImportError as e:
+            raise SystemExit("✗ data.tar 是 zstd 压缩，需要: pip install zstandard") from e
+    return blob
+
+
+def resolve_member(tf, want):
+    """按路径后缀找成员；若是软链则在包内解到真实文件。"""
+    members = list(tf.getmembers())
+    hit = None
+    for m in members:
+        if m.name.endswith("/" + want) or m.name.endswith(want):
+            hit = m
+            break
+    if not hit:
+        base = os.path.basename(want)
+        for m in members:
+            if os.path.basename(m.name) == base or os.path.basename(m.name).startswith(base + "."):
+                hit = m
+                if m.isfile():
+                    break
+    if not hit:
+        return None
+    seen = set()
+    while hit.issym() or hit.islnk():
+        if hit.name in seen:
+            return None
+        seen.add(hit.name)
+        target = hit.linkname
+        if not target.startswith("/"):
+            target_path = os.path.normpath(os.path.join(os.path.dirname(hit.name), target))
+        else:
+            target_path = target.lstrip("/")
+        nxt = next((m for m in members if m.name == target_path), None)
+        if nxt is None:
+            base = os.path.basename(target)
+            nxt = next((m for m in members if os.path.basename(m.name) == base and m.isfile()), None)
+        if nxt is None:
+            return None
+        hit = nxt
+    return hit if hit.isfile() else None
+
+
 def ar_extract(deb, wanted_suffixes):
     """deb 是 ar 归档：'!<arch>' + 若干 [60字节头][数据]。返回 {成员名: bytes}"""
     assert deb[:8] == b"!<arch>\n", "不是 ar 归档"
@@ -118,14 +170,23 @@ def main():
         print(f"· {pkg} {e.get('Version')}  ← {e['Filename']}")
         deb = get(f"{REPO}/{e['Filename']}")
         parts = ar_extract(deb, ("data.tar",))
-        blob = next(v for k, v in parts.items() if k.startswith("data.tar"))
-        with tarfile.open(fileobj=io.BytesIO(blob)) as tf:
+        blob = next((v for k, v in parts.items() if k.startswith("data.tar")), None)
+        if blob is None:
+            print(f"  ⚠ {pkg} 里没有 data.tar")
+            continue
+        try:
+            blob = decompress_tarball(blob)
+        except Exception as e:
+            print(f"  ⚠ {pkg} 解压 data.tar 失败：{e}")
+            continue
+        try:
+            tf = tarfile.open(fileobj=io.BytesIO(blob))
+        except Exception as e:
+            print(f"  ⚠ {pkg} 不是有效 tar：{e}")
+            continue
+        with tf:
             for want in members:
-                hit = None
-                for m in tf.getmembers():
-                    if m.isfile() and m.name.endswith(want):
-                        hit = m
-                        break
+                hit = resolve_member(tf, want)
                 if not hit:
                     print(f"  ⚠ {pkg} 里没找到 {want}")
                     continue
@@ -135,6 +196,11 @@ def main():
                 os.chmod(out, os.stat(out).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
                 print(f"  ✓ {os.path.basename(out)}")
 
+    needed = ("libproot.so", "libproot-loader.so", "libtalloc.so", "libandroid-shmem.so")
+    missing = [n for n in needed if not os.path.exists(os.path.join(DEST, n))]
+    if missing:
+        print("✗ 还缺：" + ", ".join(missing))
+        return 1
     print("✓ proot 就位。下一步：./gradlew assembleDebug")
     return 0
 

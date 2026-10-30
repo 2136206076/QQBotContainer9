@@ -36,7 +36,7 @@ object Proot {
     fun prepare(ctx: Context): String? {
         val nd = nativeDir(ctx)
         val bin = File(nd, "libproot.so")
-        if (!bin.exists()) return "缺少 proot：构建前请跑 bash tools/fetch-proot.sh，或手动放 jniLibs/arm64-v8a/libproot.so"
+        if (!bin.exists()) return "缺少 proot：构建前请跑 python3 tools/fetch-proot.py，或手动放 jniLibs/arm64-v8a/libproot.so"
         val st = stageDir(ctx)
         link(st, "libtalloc.so.2", File(nd, "libtalloc.so"))
         link(st, "libandroid-shmem.so", File(nd, "libandroid-shmem.so"))
@@ -49,7 +49,11 @@ object Proot {
     private fun link(dir: File, name: String, target: File) {
         if (!target.exists()) return
         val l = File(dir, name)
-        if (l.exists()) return
+        if (l.exists()) {
+            val same = try { l.canonicalPath == target.canonicalPath } catch (_: Exception) { false }
+            if (same) return
+            l.delete()
+        }
         try { Os.symlink(target.absolutePath, l.absolutePath) } catch (_: Exception) {
             try { target.copyTo(l, overwrite = true) } catch (_: Exception) {}
         }
@@ -62,8 +66,8 @@ object Proot {
         val pb = ProcessBuilder()
         val cmd = mutableListOf(
             prootBin(ctx).absolutePath,
-            "--link2symlink",          // Android 上硬链接不可靠，交给 proot 转成符号链接
-            "-0",                      // 容器内当 root
+            "--link2symlink",
+            "-0",
             "-r", r.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-b", "/sdcard",
@@ -97,13 +101,15 @@ object Proot {
             tag: String = "sh"): Int {
         val p = shell(ctx, script, extraEnv)
         val t = Thread {
-            p.inputStream.bufferedReader().useLines { lines ->
-                lines.forEach { LogBus.log("[$tag] $it") }
-            }
+            try {
+                p.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { LogBus.log("[$tag] $it") }
+                }
+            } catch (_: Throwable) {}
         }
         t.start()
         val code = p.waitFor()
-        t.join(5000)
+        t.join(8000)
         return code
     }
 }

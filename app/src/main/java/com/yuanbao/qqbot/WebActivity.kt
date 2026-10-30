@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.appcompat.app.AppCompatActivity
 
 /** 内置网页：控制台 / noVNC 扫码 */
@@ -22,6 +23,8 @@ class WebActivity : AppCompatActivity() {
             settings.loadWithOverviewMode = true
             settings.useWideViewPort = true
             settings.cacheMode = WebSettings.LOAD_NO_CACHE
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            webViewClient = WebViewClient()
         }
         setContentView(wv)
         wv.loadUrl(url)

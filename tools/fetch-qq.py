@@ -84,6 +84,8 @@ def find_asset(build=None):
             n = a["name"]
             if not (n.startswith("QQ_3.2.32") and "arm64" in n and n.endswith(".deb")):
                 continue
+            if build and build not in n:
+                continue
             if best is None or rel.get("published_at", "") > best[0].get("published_at", ""):
                 best = (rel, a)
     if not best:

@@ -14,7 +14,11 @@ echo
 echo "== 环境 =="
 info "内核/架构" "$(uname -m) / $(uname -r)"
 [ -f /etc/os-release ] && info "系统" "$(. /etc/os-release; echo "$PRETTY_NAME")"
-grep -q installed-rootfs /proc/self/mounts 2>/dev/null && ok "proot 容器" "$(bash "$HERE/mkpath-alias.sh" --probe)" || bad "proot 容器" "未检测到 installed-rootfs（脚本要在 proot 的 Ubuntu 里跑）"
+if [ -d /opt/qqstack ] || [ -f /bin/bash ]; then
+  ok "容器环境" "$(bash "$HERE/mkpath-alias.sh" --probe 2>/dev/null || echo 本机)"
+else
+  bad "容器环境" "未检测到 /opt/qqstack"
+fi
 info "可用内存" "$(free -m 2>/dev/null | awk '/Mem/{print $2" MB（已用 "$3" MB）"}' || echo '?')"
 echo
 echo "== 关键组件 =="

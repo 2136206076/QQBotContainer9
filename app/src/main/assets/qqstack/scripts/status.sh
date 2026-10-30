@@ -7,7 +7,7 @@ say() { printf '%-14s %s\n' "$1" "$2"; }
 p() { pgrep -x "$1" >/dev/null 2>&1 && echo 运行中 || echo 未运行; }
 code() { curl -s -m 2 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null; }
 
-say "环境" "$(grep -q 'installed-rootfs' /proc/self/mounts 2>/dev/null && echo 'proot 容器内' || echo '（不在 proot 里？）')"
+say "环境" "$( [ -d /opt/qqstack ] && echo '容器内' || echo '（未部署？）' )"
 say "Xvfb"     "$(p Xvfb)"
 say "x11vnc"   "$(p x11vnc)"
 say "QQ"       "$(p qq)"

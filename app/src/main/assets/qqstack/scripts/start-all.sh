@@ -67,8 +67,12 @@ fi
 
 # ---------- 4) 控制台 ----------
 if [ "$(code "http://127.0.0.1:${AGENT_PORT:-3210}/")" != "200" ]; then
-  ( cd "${AGENT_DIR:-/opt/qqagent}" && nohup node src/server.js >/tmp/qqagent.log 2>&1 </dev/null & )
-  say "控制台（:${AGENT_PORT:-3210}）"
+  if [ -f "${AGENT_DIR:-/opt/qqagent}/src/server.js" ]; then
+    ( cd "${AGENT_DIR:-/opt/qqagent}" && nohup node src/server.js >/tmp/qqagent.log 2>&1 </dev/null & )
+    say "控制台（:${AGENT_PORT:-3210}）"
+  else
+    say "跳过控制台：${AGENT_DIR:-/opt/qqagent}/src/server.js 不存在"
+  fi
 fi
 
 # ---------- 5) 等 OneBot 就绪 ----------
