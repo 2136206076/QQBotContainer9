@@ -380,12 +380,52 @@ object Installer {
 
     fun patchAndFinish(ctx: Context) {
         Proot.run(ctx, """
-            if cat /proc/locks >/dev/null 2>&1; then echo "locks: 可读，跳过补丁"; else
-              python3 /opt/qqstack/patch/patch_snowluma.py /opt/snowluma/index.mjs 2>&1 | tail -5
+            # ---- /proc/locks 补丁：按退出码分辨走了哪条路 ----
+            # patch_snowluma.py 的退出码约定：
+            #   0 = 正常（方案 A 成功 / 已打过补丁跳过 / 按设计不用打补丁）
+            #   3 = ⚠ 降级：方案 A 锚点缺失，实际写的是方案 B（替身文件兜底）
+            #   其它 = 失败
+            # 3 只是补丁精度下降，**不是部署失败** —— 这里只打醒目告警，绝不中断部署。
+            # 脚本还会把实际走的路写进 ${'$'}{STACK_DIR:-/opt/qqstack}/.locks-patch-method。
+            if cat /proc/locks >/dev/null 2>&1; then
+              echo "locks: ✓ /proc/locks 可读，按设计不打补丁（不改动任何文件）"
+              echo "       ↳ 如果 SnowLuma 仍报 EACCES /proc/locks，请加 --force 重跑："
+              echo "         python3 /opt/qqstack/patch/patch_snowluma.py /opt/snowluma/index.mjs --force"
+            else
+              out=${'$'}(python3 /opt/qqstack/patch/patch_snowluma.py /opt/snowluma/index.mjs 2>&1); rc=${'$'}?
+              echo "${'$'}out" | tail -6
+              case "${'$'}rc" in
+                0) echo "locks: ✓ 补丁完成（方案 A：结构化补丁，优选）" ;;
+                3) echo "locks: ⚠⚠ 走了方案 B（替身文件兜底，退出码 3）—— 属降级成功，不中断部署" ;
+                   echo "       ↳ 补丁是打上了，但精度不如方案 A，且替身文件有时效性（QQ 重启后 PID 会变）" ;
+                   echo "       ↳ 建议核对 SnowLuma 版本（应与 QQ 3.2.32-52194 配对的 2.1.1）后重打方案 A" ;;
+                *) echo "locks: ✗ 补丁失败（退出码 ${'$'}rc）—— 看上面的报错" ;
+                   echo "       ↳ 不中断部署；但 SnowLuma 可能停在 awaiting readiness" ;;
+              esac
               bash /opt/qqstack/scripts/mkfake-locks.sh
             fi
             bash /opt/qqstack/scripts/mkpath-alias.sh 2>&1 | tail -5
             bash /opt/qqstack/scripts/freeze-hotupdate.sh 2>&1 | tail -3
+            # resident dispatch 载荷：proot 下 memfd 版 dlopen 加载不了，slhook.c 的拦截器会
+            # 退回磁盘路径 ${'$'}RESIDENT_SO，而这个磁盘文件官方包不带 —— 只能从 SnowLuma 主库
+            # 内嵌的 ELF 载荷里导出。脚本幂等、开销极小，所以每次都重跑：既能自愈掉地上残留的
+            # 旧/坏 .so，也不会因为「文件碰巧存在」就误报成功。
+            [ -f /opt/qqstack/scripts/deploy.env ] && . /opt/qqstack/scripts/deploy.env
+            SRC_SO="${'$'}{HOOK_SO:-${'$'}{SNOWLUMA_DIR:-/opt/snowluma}/native/snowluma-linux-arm64.so}"
+            DST_SO="${'$'}{RESIDENT_SO:-${'$'}{STACK_DIR:-/opt/qqstack}/libsnowluma_linux_resident_dispatch.so}"
+            if [ -f "${'$'}SRC_SO" ] && [ -f /opt/qqstack/tools/extract-resident-dispatch.py ]; then
+              out=${'$'}(python3 /opt/qqstack/tools/extract-resident-dispatch.py --source "${'$'}SRC_SO" --target "${'$'}DST_SO" 2>&1); rc=${'$'}?
+              echo "${'$'}out" | tail -6
+              if [ "${'$'}rc" -eq 2 ]; then
+                echo "⚠ 载荷疑似不对（没匹配到 resident_dispatch 特征），已拒绝写出，${'$'}DST_SO 保持原样"
+              elif [ "${'$'}rc" -eq 0 ] && python3 -c "import sys;d=open(sys.argv[1],'rb').read();sys.exit(0 if d[:4]==b'\x7fELF' and b'resident_dispatch' in d else 1)" "${'$'}DST_SO" 2>/dev/null; then
+                echo "✓ resident dispatch 载荷已导出（ELF magic + resident_dispatch 特征都校验过）"
+              else
+                echo "⚠ 载荷导出失败：hook 会退回 stub，SnowLuma 可能停在 awaiting readiness"
+              fi
+            else
+              echo "· SnowLuma 主库未就位，跳过 resident dispatch 导出"
+            fi
             touch ${Cfg.DEPLOYED_MARK}
         """.trimIndent(), tag = "patch")
     }

@@ -144,10 +144,14 @@ tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 ## 7. 已知限制（说实话）
 
 1. **QQ 包必须你提供**，原因见第 3 节。
-2. **`libslhook.so` 由容器内的 gcc 现编**（源码 `assets/qqstack/bin/slhook.c`），
-   但 `libsnowluma_linux_resident_dispatch.so`（hook 内嵌载荷）是二进制，
-   **需要你从原部署包的 `bin/` 里拷到容器内 `/opt/qqstack/`**，
-   或者让 SnowLuma 自己从 release 里带出来——这一步我没有替代方案。
+2. **resident dispatch 载荷（`libsnowluma_linux_resident_dispatch.so`）已由 App 自动导出**。
+   proot 下 memfd 版 dlopen 加载不了，hook 的 dlopen 拦截器会退回磁盘路径加载，
+   而这个磁盘文件发布包里从来不带 —— 之前我只能让你手动从原部署包 `bin/` 里拷。
+   现在不需要了：它本来就**内嵌在 SnowLuma 主库**（`native/snowluma-linux-arm64.so`）里，
+   App 会自动把它抠出来写到 `/opt/qqstack/libsnowluma_linux_resident_dispatch.so`
+   （脚本：`tools/extract-resident-dispatch.py`，部署时随 assets 拷进容器 `/opt/qqstack/tools/`，
+   偏移和长度都是运行时按 ELF header 算的，SnowLuma 升级也不会因为写死数字而失效）。
+   三个入口都会跑：部署收尾、每次 `start-all.sh` 拉起 QQ 前、「hook 诊断」里还会自愈补一次。
 3. **我没能替你在真机上跑一遍**：proot 参数、`--link2symlink`、
    `LD_LIBRARY_PATH` staging 这几处是按 Termux/UserLAnd 的通行做法写的，
    第一次部署如果卡住，点「hook 诊断」，把日志里 `[slhook]` 开头的行发出来定位。

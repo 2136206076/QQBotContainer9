@@ -97,10 +97,26 @@ object Proot {
         return pb.start()
     }
 
+    /**
+     * 收尾等待的上限（毫秒）。
+     *
+     * 子进程一退出，管道随即关闭，读线程会在几毫秒内收完尾 —— 这个上限纯粹是防御：
+     * 万一子进程 fork 出去的后台进程还攥着管道写端（readLine() 就一直等不到 EOF），
+     * 也不至于把调用方永久挂住。60s 对「收尾」绰绰有余，对 apt 那种 5~15 分钟的长命令
+     * 完全不构成限制 —— 因为读线程是**全程并发**在消费的，不存在攒到最后一次性读的情况。
+     */
+    private const val READER_JOIN_TIMEOUT_MS = 60_000L
+
     /** 跑完一段脚本，把输出逐行喂给 LogBus，返回退出码 */
     fun run(ctx: Context, script: String, extraEnv: Map<String, String> = emptyMap(),
             tag: String = "sh"): Int {
         val p = shell(ctx, script, extraEnv)
+        // 读线程必须**先于** waitFor() 起来：输出走的是管道，缓冲区只有几十 KB，
+        // 写满了没人读，子进程就卡在 write() 上，waitFor() 也就永远等不到它结束。
+        // 有这个线程在后台持续消费，子进程不会被管道堵住 —— 这是不死锁的前提。
+        //
+        // 不设 isDaemon = true：保持默认的非守护线程，这样即使调用方所在线程先结束，
+        // JVM 也不会把正在往外倒日志的线程直接掐掉（日志丢一半比慢一点更难查）。
         val t = Thread {
             try {
                 p.inputStream.bufferedReader().useLines { lines ->
@@ -109,8 +125,17 @@ object Proot {
             } catch (_: Throwable) {}
         }
         t.start()
-        val code = p.waitFor()
-        t.join(8000)
+        // ⚠ 顺序不能颠倒：必须「先 waitFor() 再 join()」，原因：
+        //   ① waitFor() 先返回 —— 读线程一直在消费管道，子进程不会因管道满而卡住，
+        //      所以 waitFor() 一定能正常拿到退出码；
+        //   ② 再 join() 等读线程收尾 —— 保证函数返回时，子进程输出的最后几行也已经
+        //      喂进 LogBus。以前这里是 join(8000)：apt 那种长命令日志量大时，8 秒一到
+        //      就提前返回，于是「== 完成 ==」先打出来、后面的日志才姗姗来迟，
+        //      看起来像日志丢了。
+        //   反过写（先 join 再 waitFor）会死锁：子进程还在跑、管道还在被写，
+        //   读线程不退出 → join() 卡死 → waitFor() 根本没机会执行。
+        //   用 finally 兜住：即使 waitFor() 被打断/抛异常，也一定去 join，不留悬挂线程。
+        val code = try { p.waitFor() } finally { t.join(READER_JOIN_TIMEOUT_MS) }
         return code
     }
 }

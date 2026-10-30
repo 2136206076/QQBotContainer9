@@ -1,3 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
+
     <string name="app_name">QQ 机器人容器</string>
+
+    <!-- 头部 -->
+    <string name="subtitle">proot · Ubuntu 24.04 · Linux QQ 3.2.32</string>
+
+    <!-- QQ 包来源 -->
+    <string name="hint_qq_src">留空=自动下载 QQ 3.2.32；也可填 URL 或 /sdcard/...deb</string>
+
+    <!-- 主操作 -->
+    <string name="btn_deploy">一键部署</string>
+
+    <!-- 分组标题 -->
+    <string name="group_ops">运维</string>
+    <string name="group_trouble">排障</string>
+    <string name="group_shortcut">快捷入口</string>
+
+    <!-- 运维 -->
+    <string name="btn_start">启动</string>
+    <string name="btn_stop">停止</string>
+    <string name="btn_status">状态</string>
+    <string name="btn_ver">版本体检</string>
+
+    <!-- 排障 -->
+    <string name="btn_diag">hook 诊断</string>
+    <string name="btn_keep">保活指引</string>
+    <string name="btn_crash">崩溃日志</string>
+
+    <!-- 快捷入口 -->
+    <string name="btn_console">控制台 :3210</string>
+    <string name="btn_vnc">扫码登录 :6081</string>
+
+    <!-- 状态卡 -->
+    <string name="card_status_title">组件状态</string>
+    <string name="st_rootfs">Ubuntu rootfs</string>
+    <string name="st_qq">Linux QQ</string>
+    <string name="st_snow">SnowLuma</string>
+    <string name="st_payload">resident dispatch 载荷</string>
+    <string name="st_agent">QQ Agent</string>
+    <string name="st_unknown">未知</string>
+
+    <!-- 进度 -->
+    <string name="progress_prepare">准备中…</string>
+    <string name="progress_idle">0%</string>
+
+    <!-- 日志 -->
+    <string name="log_title">运行日志</string>
+
+    <!-- 对话框（文案保持原样） -->
+    <string name="dlg_storage_title">需要访问本地文件</string>
+    <string name="dlg_storage_msg">Android 11+ 读取 /sdcard 上的 QQ 安装包需要「所有文件访问」权限。去系统设置打开后，再点一次「一键部署」。</string>
+    <string name="dlg_storage_go">去设置</string>
+    <string name="dlg_cancel">取消</string>
+    <string name="dlg_keep_title">保活</string>
+    <string name="dlg_keep_copy">复制 adb 命令</string>
+    <string name="dlg_keep_ok">知道了</string>
+    <string name="dlg_crash_title">崩溃日志 —— %1$s</string>
+    <string name="dlg_crash_copy">复制全部</string>
+    <string name="dlg_crash_close">关闭</string>
+    <string name="toast_copied">已复制</string>
+
 </resources>

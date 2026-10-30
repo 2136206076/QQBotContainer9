@@ -113,6 +113,15 @@ class DeployService : Service() {
         }
     }
 
+    /** 结果清单里的一行：就绪打 ✓，没就绪打 ✗ 并给出下一步该做什么。 */
+    private fun reportComponent(name: String, ok: Boolean, fix: String) {
+        if (ok) {
+            LogBus.log("  ✓ $name：已就绪")
+        } else {
+            LogBus.log("  ✗ $name：未就绪 → $fix")
+        }
+    }
+
     private fun deploy(qqSrc: String) {
         LogBus.log("========== 一键部署开始 ==========")
         LogBus.log("· proot: ${Proot.prootBin(this).absolutePath}")
@@ -136,13 +145,16 @@ class DeployService : Service() {
         if (!Installer.bootstrap(this)) { LogBus.log("✗ 卡在这一步，看上面报错"); return }
 
         LogBus.log("[5/9] 装 QQ Agent（大脑）")
-        if (!Installer.installAgent(this)) LogBus.log("⚠ QQ Agent 未就绪（可稍后重试）")
+        val agentOk = Installer.installAgent(this)
+        if (!agentOk) LogBus.log("⚠ QQ Agent 未就绪（可稍后重试）")
 
         LogBus.log("[6/9] 装 SnowLuma（协议端）")
-        if (!Installer.installSnowLuma(this)) LogBus.log("⚠ SnowLuma 未就绪（可稍后重试）")
+        val snowOk = Installer.installSnowLuma(this)
+        if (!snowOk) LogBus.log("⚠ SnowLuma 未就绪（可稍后重试）")
 
         LogBus.log("[7/9] 装 Linux 版 QQ（必须是 3.2.32-52194）")
-        if (!Installer.installQQ(this, qqSrc)) {
+        val qqOk = Installer.installQQ(this, qqSrc)
+        if (!qqOk) {
             LogBus.log("⚠ QQ 没装好。留空会自动下；也可填本地 deb 路径或直链后重跑部署")
         }
 
@@ -152,6 +164,24 @@ class DeployService : Service() {
         LogBus.log("[9/9] 拉起：虚拟屏 → 协议端 → QQ → 控制台")
         Installer.vncPassword(this, "12345678")
         Installer.start(this)
+
+        // ===== 本次部署结果清单 =====
+        // 5/6/7 步失败时只打一句 ⚠、不中断流程，所以 9 步跑完直接打「部署结束」很容易
+        // 让人误以为全好了。这里把每一步的真实结果摊开：就绪的 ✓，没就绪的 ✗ + 该做什么。
+        LogBus.log("========== 本次部署结果（清单）==========")
+        reportComponent("QQ Agent（大脑）", agentOk,
+            "重跑部署；或手动：cd /opt/qqagent && git pull && npm install --omit=dev，再 node src/server.js 试起")
+        reportComponent("SnowLuma（协议端）", snowOk,
+            "重跑部署；或手动下 SnowLuma-v2.1.1-linux-arm64.tar.gz 解到 /opt/snowluma（版本要和 QQ 配对）")
+        reportComponent("Linux 版 QQ", qqOk,
+            "QQ 没装好 → 留空会自动下载，或在上方填本地 deb 路径/直链后重跑部署（须 3.2.32-52194 arm64）")
+        LogBus.log("  · 补丁/别名/热更新屏蔽/载荷导出：看上面 [8/9] 的输出")
+        LogBus.log("  · /proc/locks 补丁走的是方案 A 还是方案 B：cat ${Cfg.STACK}/.locks-patch-method")
+        LogBus.log("  · 三大件当前状态复核：bash ${Cfg.STACK}/scripts/versions.sh")
+        LogBus.log(if (agentOk && snowOk && qqOk)
+            "  ✓ 三大件都已就绪，可以去扫码登录了"
+        else
+            "  ⚠ 上面有组件没就绪 —— 这一轮**不算部署成功**，按提示补齐后重跑部署")
 
         LogBus.log("""
             ========== 部署结束 ==========

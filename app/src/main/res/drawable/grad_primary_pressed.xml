@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主按钮按压态：整体压深一档 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="0"
+        android:endColor="#0091B4"
+        android:startColor="#00A883"
+        android:type="linear" />
+    <corners android:radius="12dp" />
+</shape>

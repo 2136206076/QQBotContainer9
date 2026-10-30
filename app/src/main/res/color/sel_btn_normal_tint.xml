@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 忙碌态：按钮被禁用时整体压暗 -->
+    <item android:color="@color/bgButtonDisabled" android:state_enabled="false" />
+    <item android:color="@color/bgButtonPressed" android:state_pressed="true" />
+    <item android:color="@color/bgButton" />
+</selector>

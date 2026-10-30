@@ -4,7 +4,8 @@
  *   - 多拦一个 epoll_pwait2（新版 Chromium/Node 会用它）
  * 行为：
  *   - 只作用于 QQ 主进程（带 --type= 的子进程直接跳过）
- *   - 在 QQ 主线程的 epoll 循环里执行 dlopen + start_dynamic
+ *   - 在 QQ 主线程的 epoll 循环里执行 dlopen + start_dynamic，
+ *     这样 hook 安装时运行在它预期的线程上下文里
  *   - 把 stub 的 dlopen("/proc/self/fd/N") 换成从本地解包文件加载
  *     （proot 下 memfd 路径不可用，会 file too short）
  */
@@ -98,6 +99,9 @@ static void maybe_start(void) {
     const char *d = getenv("SLHOOK_DELAY_MS");
     long delay = d ? atol(d) : 5000;
     if (now_ms() < delay) return;
+    /* 默认就等 wrapper.node 出现再启动：stub 需要先 inspect 这个模块，
+     * 太早启动它会退回 stub 后端、之后一直卡在 awaiting readiness。
+     * 想跳过这个等待（比如调试时想看最早启动会怎样）就设 SLHOOK_WAIT_WRAPPER=0。 */
     const char *w = getenv("SLHOOK_WAIT_WRAPPER");
     int waitWrapper = !(w && *w == '0');
     static long waitFrom = 0;

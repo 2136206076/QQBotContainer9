@@ -36,9 +36,63 @@ case "$SYSNV" in
   v2[0-9]*|v3[0-9]*) ok "系统 node（跑 Agent）" "$SYSNV（≥20 可以）" ;;
   *) bad "系统 node（跑 Agent）" "${SYSNV:-缺失}（需 ≥20，Ubuntu apt 默认 18，要换 NodeSource 22）" ;;
 esac
+# ---- 配对校验（重点）----
+# 上面是逐项体检，这里做**联合判定**：QQ 和 SnowLuma 是硬配对的 —— 版本对不上
+# 的表现是「进程都起来了、但 SnowLuma 永远 awaiting readiness」，而且不报任何错，
+# 最难查。所以两个都必须同时是实测可用版本才算通过，缺一个就明确告诉用户该装哪个。
+EXP_QQ="3.2.32-52194"; EXP_QQ_ARCH="arm64"
+EXP_SL="2.1.1"; EXP_SLT="linux-arm64"
+echo
+echo "== QQ × SnowLuma 配对校验（关键）=="
+info "实测可用组合" "QQ $EXP_QQ ($EXP_QQ_ARCH)  +  SnowLuma $EXP_SL ($EXP_SLT)"
+# QQ 主程序的实际架构：直接读 ELF 头里的 e_machine，比看 deb 包名可靠
+QQ_ARCH=$(python3 - "$QQ_DIR/qq" <<'PY' 2>/dev/null
+import struct, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        head = f.read(64)
+    if head[:4] != b"\x7fELF":
+        print("?")
+    else:
+        fmt = "<" if head[5] == 1 else ">"
+        machine = struct.unpack_from(fmt + "H", head, 18)[0]
+        print({183: "arm64", 62: "x86_64", 3: "x86"}.get(machine, "e_machine=%d" % machine))
+except Exception:
+    print("?")
+PY
+)
+[ -n "$QQ_ARCH" ] || QQ_ARCH="?"
+info "QQ 主程序架构" "$QQ_ARCH（期望 $EXP_QQ_ARCH）"
+if [ "$QV" = "$EXP_QQ" ] && [ "$SV" = "$EXP_SL" ] && [ "$ST" = "$EXP_SLT" ] && [ "$QQ_ARCH" = "$EXP_QQ_ARCH" ]; then
+  ok "配对结果" "✓ 一致 —— QQ $QV ($QQ_ARCH) × SnowLuma $SV ($ST)，可以放心跑 start-all.sh"
+else
+  bad "配对结果" "✗ 不配对 —— 这样即使全起来了，SnowLuma 也会一直 awaiting readiness 且无报错"
+  [ "$QV" = "$EXP_QQ" ] || info "  ↳ 该装的 QQ" "$EXP_QQ（$EXP_QQ_ARCH）：QQ_3.2.32_*_arm64_01.deb / 当前是 ${QV:-未安装}"
+  [ "$SV" = "$EXP_SL" ] && [ "$ST" = "$EXP_SLT" ] || \
+    info "  ↳ 该装的 SnowLuma" "$EXP_SL（$EXP_SLT）：SnowLuma-v$EXP_SL-$EXP_SLT.tar.gz / 当前是 ${SV:-未安装} ${ST:-}"
+  [ "$QQ_ARCH" = "$EXP_QQ_ARCH" ] || info "  ↳ 架构不对" "QQ 主程序是 $QQ_ARCH，请换 $EXP_QQ_ARCH 的包"
+  info "  ↳ 换完再跑" "bash $HERE/versions.sh 复核 → bash $HERE/start-all.sh"
+fi
+
+# 这两个 .so 缺了都不用慌：一个能从 SnowLuma 主库里自动导出，一个是容器里现场编的。
+# 所以「缺失」时不光打 ✗，还要直接把自愈命令指出来。
 for f in libslhook.so libsnowluma_linux_resident_dispatch.so; do
-  if [ -f "$STACK_DIR/$f" ]; then info "$f" "$(md5sum "$STACK_DIR/$f" | cut -d' ' -f1)"
-  else bad "$f" "缺失"; fi
+  if [ -f "$STACK_DIR/$f" ]; then
+    info "$f" "$(md5sum "$STACK_DIR/$f" | cut -d' ' -f1)"
+    continue
+  fi
+  case "$f" in
+    libsnowluma_linux_resident_dispatch.so)
+      bad "$f" "缺失 → 可以自动导出，不用自己找二进制"
+      info "  ↳ 现在就导出" "python3 $STACK_DIR/tools/extract-resident-dispatch.py"
+      info "  ↳ 或跑一次诊断" "bash $HERE/slhook-diag.sh（它的第 0 步会自动补导出）"
+      ;;
+    libslhook.so)
+      bad "$f" "缺失 → 它是容器里用 gcc 现编的，需要重跑部署第 4 步（[4/9] 用 gcc 编出 hook 载入器）"
+      info "  ↳ 手动补编" "gcc -shared -fPIC -O2 -o $STACK_DIR/libslhook.so $HERE/../bin/slhook.c -ldl"
+      ;;
+    *) bad "$f" "缺失" ;;
+  esac
 done
 [ -f "$SNOWLUMA_DIR/native/snowluma-linux-arm64.so" ] && info "hook 主 so" "$(md5sum "$SNOWLUMA_DIR/native/snowluma-linux-arm64.so" | cut -d' ' -f1)" || bad "hook 主 so" "缺失"
 for pkg in xvfb x11vnc novnc websockify fluxbox imagemagick; do

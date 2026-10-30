@@ -102,6 +102,31 @@ else
   echo "  ✓ 已存在"
 fi
 
+say "6.5 导出 resident dispatch 载荷（hook 的磁盘兜底要用）"
+# proot 下 memfd 版 dlopen 加载不了，slhook.c 会换成磁盘路径加载，而那个磁盘 .so
+# 官方包不带，得从 SnowLuma 主库内嵌的 ELF 载荷里抠出来（tools/extract-resident-dispatch.py）。
+# 顺序说明：本脚本在 App 的 [4/9] 执行，SnowLuma 通常 [6/9] 才装 —— 所以这里
+# 「源文件不在」是正常情况，只跳过、不算失败，真正生效的位置是 start-all.sh / slhook-diag.sh。
+EXTRACT_PY="$HERE/../tools/extract-resident-dispatch.py"
+SRC_SO="${HOOK_SO:-${SNOWLUMA_DIR:-/opt/snowluma}/native/snowluma-linux-arm64.so}"
+DST_SO="${RESIDENT_SO:-${STACK_DIR:-/opt/qqstack}/libsnowluma_linux_resident_dispatch.so}"
+if [ ! -f "$SRC_SO" ]; then
+  echo "  · SnowLuma 主库还没装（$SRC_SO），跳过 —— 稍后 patch/start-all 会自动补做"
+elif [ ! -f "$EXTRACT_PY" ]; then
+  echo "  ⚠ 找不到导出脚本 $EXTRACT_PY，跳过"
+elif command -v python3 >/dev/null 2>&1; then
+  python3 "$EXTRACT_PY" --source "$SRC_SO" --target "$DST_SO" 2>&1 | sed 's/^/  /'
+  extract_rc="${PIPESTATUS[0]}"
+  if [ "$extract_rc" -eq 2 ]; then
+    # 退出码 2 = 载荷没匹配到 resident_dispatch 特征，脚本已拒绝写出，不会留下错的文件
+    echo "  ⚠ 载荷疑似不对（没匹配到 resident_dispatch 特征），已拒绝写出，不会留下错的 $DST_SO"
+  elif [ "$extract_rc" -ne 0 ]; then
+    echo "  ⚠ 导出失败（仅告警，不影响 bootstrap 完成）"
+  fi
+else
+  echo "  ⚠ 没有 python3，跳过"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "  ✗ bootstrap 未完成，不落 .bootstrapped，下次会重试"
   exit 1
@@ -119,6 +144,12 @@ cat <<NEXT
        /opt/qqagent       （QQ Agent，node src/server.js 能起）
   2) cd /opt/qqagent && npm install --omit=dev
   3) python3 $HERE/../patch/patch_snowluma.py ${SNOWLUMA_DIR:-/opt/snowluma}/index.mjs
+       退出码：0 = 正常（方案 A 结构化补丁成功 / 已打过跳过 / 按设计不用打）
+               3 = ⚠ 降级到方案 B（替身文件兜底）—— 属降级成功，
+                   **不要**因此中断部署，但要人工看一眼：精度不如方案 A，
+                   且替身文件有时效性（QQ 重启后 PID 会变）
+               其它 = 失败，看报错
+       走了哪条路也可以直接查：cat ${STACK_DIR:-/opt/qqstack}/.locks-patch-method
   4) bash $HERE/versions.sh
   5) bash $HERE/start-all.sh
 NEXT

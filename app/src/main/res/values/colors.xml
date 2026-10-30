@@ -1,5 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="colorPrimary">#1565C0</color>
-    <color name="colorPrimaryDark">#0D47A1</color>
-    <color name="colorAccent">#00897B</color>
+
+    <!-- ===== 品牌色 ===== -->
+    <color name="brandPrimary">#00D6A4</color>
+    <color name="brandSecondary">#00B0D8</color>
+    <color name="brandPrimaryDark">#00A883</color>
+    <color name="brandSecondaryDark">#0091B4</color>
+
+    <!-- ===== 背景层次 ===== -->
+    <color name="bgScreen">#0F141B</color>
+    <color name="bgDark">#0B1017</color>
+    <color name="bgCard">#141B24</color>
+    <color name="bgButton">#18212C</color>
+    <color name="bgButtonPressed">#212E3D</color>
+    <color name="bgButtonDisabled">#151B23</color>
+    <color name="bgInput">#121922</color>
+    <color name="bgLog">#0B1017</color>
+
+    <!-- ===== 描边 ===== -->
+    <color name="border">#1F2937</color>
+    <color name="borderStrong">#232F3C</color>
+
+    <!-- ===== 文字 ===== -->
+    <color name="textTitle">#E8EEF6</color>
+    <color name="textBody">#C3CED9</color>
+    <color name="textSecondary">#8595A8</color>
+    <color name="textDim">#5F6F82</color>
+    <color name="textOnBrand">#08131A</color>
+
+    <!-- ===== 语义色（状态灯 / 日志） ===== -->
+    <color name="stateOk">#00D6A4</color>
+    <color name="stateWarn">#FFB020</color>
+    <color name="stateErr">#FF5F57</color>
+    <color name="stateOff">#5F6F82</color>
+
+    <color name="logOk">#00D6A4</color>
+    <color name="logWarn">#FFB020</color>
+    <color name="logErr">#FF5F57</color>
+    <color name="logDim">#3F4B5A</color>
+
+    <!-- ===== 其它 ===== -->
+    <color name="progressTrack">#1F2937</color>
+    <color name="linkStroke">#3FBFD6</color>
+    <color name="linkText">#57D3E4</color>
+    <color name="linkFillPressed">#13262E</color>
+    <color name="rippleNormal">#2A3B4B</color>
+
+    <!-- 兼容旧引用（保留原名，指向新配色） -->
+    <color name="colorPrimary">#00D6A4</color>
+    <color name="colorPrimaryDark">#0B1017</color>
+    <color name="colorAccent">#00D6A4</color>
+
 </resources>

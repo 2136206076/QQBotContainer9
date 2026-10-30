@@ -47,7 +47,47 @@ pgrep -f "snowluma/nod[e]" >/dev/null 2>&1 || {
   say "SnowLuma（WebUI :${SLWEBUI_PORT:-5099}）"; }
 sleep 5
 
-# ---------- 3) QQ（带 hook）----------
+# ---------- 3) 导出 resident dispatch 载荷 ----------
+# proot 下 memfd 版 dlopen 加载不了，slhook.c 的 dlopen 拦截器会把 /proc/self/fd/N
+# 换成磁盘路径 $SNOWLUMA_RESIDENT_SO 再加载；可这个磁盘文件官方包从来不带，
+# 于是拦截器 fallback 到一个不存在的文件 → hook 退回 stub → SnowLuma 一直 awaiting readiness。
+# 解法：从 SnowLuma 主库内部内嵌的那份 ELF 载荷里抠出来，写到磁盘。幂等，失败也只告警。
+EXTRACT_PY="$HERE/../tools/extract-resident-dispatch.py"
+SRC_SO="${HOOK_SO:-${SNOWLUMA_DIR:-/opt/snowluma}/native/snowluma-linux-arm64.so}"
+DST_SO="${RESIDENT_SO:-${STACK_DIR:-/opt/qqstack}/libsnowluma_linux_resident_dispatch.so}"
+if [ -f "$SRC_SO" ] && [ -f "$EXTRACT_PY" ] && command -v python3 >/dev/null 2>&1; then
+  python3 "$EXTRACT_PY" --source "$SRC_SO" --target "$DST_SO" 2>&1 | sed 's/^/  /'
+  extract_rc="${PIPESTATUS[0]}"
+  if [ "$extract_rc" -eq 2 ]; then
+    # 退出码 2 = 载荷没匹配到 resident_dispatch 特征：脚本拒绝写出，旧的 .so 保持原样
+    say "⚠ 载荷疑似不对（没匹配到 resident_dispatch 特征）：已拒绝写出，$DST_SO 保持原样"
+  elif [ "$extract_rc" -ne 0 ]; then
+    say "⚠ 载荷导出失败：hook 会退回 stub，QQ 能起来但 SnowLuma 停在 awaiting readiness"
+  fi
+else
+  say "跳过载荷导出（SnowLuma 主库/导出脚本/python3 缺一样，后续 hook 诊断会再试一次）"
+fi
+
+# ---------- 3.5) 回显 /proc/locks 补丁走了哪条路 ----------
+# patch_snowluma.py 跑完会把实际走的路写进标记文件，以前成功/降级/跳过全都 return 0，
+# 只能翻日志才分得清，容易被静默降级骗过去。这里回显出来，方案 B 要醒目提示。
+METHOD_FILE="${STACK_DIR:-/opt/qqstack}/.locks-patch-method"
+if [ -f "$METHOD_FILE" ]; then
+  m=$(sed -n 's/^method=//p' "$METHOD_FILE" 2>/dev/null | head -1)
+  n=$(sed -n 's/^method_name=//p' "$METHOD_FILE" 2>/dev/null | head -1)
+  case "$m" in
+    A)    say "· /proc/locks 补丁：方案 A（结构化补丁，优选）" ;;
+    B)    say "⚠⚠ /proc/locks 补丁：方案 B（替身文件兜底，降级）—— 补丁上了，但精度不如方案 A，"
+          say "    且替身文件有时效性（QQ 重启后 PID 会变）。建议核对 SnowLuma 版本后重打方案 A" ;;
+    NONE) say "· /proc/locks 补丁：${n:-未打补丁} —— 本次没改动任何文件" ;;
+    *)    say "· /proc/locks 补丁：${n:-未知状态（$m）}" ;;
+  esac
+  say "    ↳ 详情：cat $METHOD_FILE"
+else
+  say "· 还没跑过 /proc/locks 补丁（无标记文件 $METHOD_FILE）"
+fi
+
+# ---------- 4) QQ（带 hook）----------
 if ! pgrep -x qq >/dev/null 2>&1; then
   rm -f "${RUNTIME_DIR:-/tmp/snowluma-${QQ_UID:-0}}/mojo."* 2>/dev/null
   ( cd "$HOME" && HOME="$HOME" DISPLAY="$DISPLAY" \
@@ -65,7 +105,7 @@ else
   say "QQ 已在运行，跳过"
 fi
 
-# ---------- 4) 控制台 ----------
+# ---------- 5) 控制台 ----------
 if [ "$(code "http://127.0.0.1:${AGENT_PORT:-3210}/")" != "200" ]; then
   if [ -f "${AGENT_DIR:-/opt/qqagent}/src/server.js" ]; then
     ( cd "${AGENT_DIR:-/opt/qqagent}" && nohup node src/server.js >/tmp/qqagent.log 2>&1 </dev/null & )
@@ -75,7 +115,7 @@ if [ "$(code "http://127.0.0.1:${AGENT_PORT:-3210}/")" != "200" ]; then
   fi
 fi
 
-# ---------- 5) 等 OneBot 就绪 ----------
+# ---------- 6) 等 OneBot 就绪 ----------
 say "等待就绪（最多 ${BOOT_WAIT:-120}s）…"
 i=0
 while [ "$i" -lt "${BOOT_WAIT:-120}" ]; do
