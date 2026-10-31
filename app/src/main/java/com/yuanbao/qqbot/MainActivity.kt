@@ -365,7 +365,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun probeAgent(root: File): Probe = try {
-        if (File(root, "opt/qqagent/src/server.js").exists()) Probe(Level.OK, "就绪")
+        // QQ Agent 是 TypeScript 项目：就绪标志是 package.json + src/index.ts（不是老的 src/server.js）
+        if (File(root, "opt/qqagent/package.json").exists() && File(root, "opt/qqagent/src/index.ts").exists())
+            Probe(Level.OK, "就绪")
         else Probe(Level.OFF, "未安装")
     } catch (e: Throwable) {
         Probe(Level.ERR, getString(R.string.st_unknown))

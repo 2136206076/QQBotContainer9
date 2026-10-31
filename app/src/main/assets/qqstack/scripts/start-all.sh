@@ -105,13 +105,31 @@ else
   say "QQ 已在运行，跳过"
 fi
 
-# ---------- 5) 控制台 ----------
-if [ "$(code "http://127.0.0.1:${AGENT_PORT:-3210}/")" != "200" ]; then
-  if [ -f "${AGENT_DIR:-/opt/qqagent}/src/server.js" ]; then
-    ( cd "${AGENT_DIR:-/opt/qqagent}" && nohup node src/server.js >/tmp/qqagent.log 2>&1 </dev/null & )
-    say "控制台（:${AGENT_PORT:-3210}）"
+# ---------- 5) 控制台（QQ Agent，TypeScript 项目）----------
+# 启动方式二选一，优先编译产物：
+#   node dist/src/index.js   —— 部署时 npm run build（tsc）编出来的，纯 node 跑，省内存、启动快
+#   tsx src/index.ts         —— 官方 npm start 的用法，现编现跑；dist 没编出来时兜底
+# 不强制依赖 dist：tsconfig 开了 noUnusedLocals，scripts/ 下测试脚本一有未用变量 tsc 就编不过，
+# 把"控制台能不能起来"押在编译上不划算，所以两条路都留着。
+# 顺序说明：Agent 是 OneBot 客户端，主动连 SnowLuma 的正向 WS（默认 ws://127.0.0.1:3001，
+# 即 deploy.env 的 BOT_WS）。它在第 5 步先起、第 6 步才等 OneBot 就绪，中间连不上只会在
+# 日志里打 "等待重连 OneBot" 并按 1s→30s 退避重试（config/app.yaml 的 napcat.reconnect），
+# SnowLuma 起来后自动连上 —— 所以不需要把它挪到第 6 步之后（挪过去反而要多等一轮就绪）。
+if [ "$(code "http://127.0.0.1:${AGENT_PORT:-3081}/")" != "200" ]; then
+  AGENT_HOME="${AGENT_DIR:-/opt/qqagent}"
+  if [ -f "$AGENT_HOME/dist/src/index.js" ]; then
+    # 顺手写 pidfile（run/ 下，和 Xvfb/x11vnc 一个惯例）：stop-all.sh 靠它精确点名，
+    # 比按命令行匹配可靠，也不用为了让 cmdline 里有绝对路径而改成绝对路径启动。
+    # 就算这条 pid 记的是外层 shell、node 是它 fork 出来的，stop-all 的 /proc 扫描照样兜得住
+    ( cd "$AGENT_HOME" && nohup node dist/src/index.js >/tmp/qqagent.log 2>&1 </dev/null &
+      echo $! >"$RUN/qqagent.pid" )
+    say "控制台（node dist/src/index.js，:${AGENT_PORT:-3081}）"
+  elif [ -f "$AGENT_HOME/src/index.ts" ] && [ -x "$AGENT_HOME/node_modules/.bin/tsx" ]; then
+    ( cd "$AGENT_HOME" && nohup ./node_modules/.bin/tsx src/index.ts >/tmp/qqagent.log 2>&1 </dev/null &
+      echo $! >"$RUN/qqagent.pid" )
+    say "控制台（tsx src/index.ts，:${AGENT_PORT:-3081}）"
   else
-    say "跳过控制台：${AGENT_DIR:-/opt/qqagent}/src/server.js 不存在"
+    say "跳过控制台：$AGENT_HOME 里既没有 dist/src/index.js 也没有可执行的 tsx（Agent 没装好？看部署第 5 步日志）"
   fi
 fi
 
@@ -127,12 +145,13 @@ while [ "$i" -lt "${BOOT_WAIT:-120}" ]; do
 done
 
 echo
-echo "  控制台   http://127.0.0.1:${AGENT_PORT:-3210}"
+echo "  控制台   http://127.0.0.1:${AGENT_PORT:-3081}（QQ Agent，要自备 LLM API Key，在面板「模型接入」里填）"
 echo "  协议端   http://127.0.0.1:${SLWEBUI_PORT:-5099}"
 echo "  扫码     noVNC: http://127.0.0.1:${NOVNC_PORT:-6081}/vnc.html"
 echo "           或手机装任意 VNC 客户端连 127.0.0.1:${VNC_PORT:-5900}"
 echo "  OneBot   ${BOT_HTTP:-3000}/$(code "http://127.0.0.1:${BOT_HTTP:-3000}/")  ${BOT_WS:-3001}/$(code "http://127.0.0.1:${BOT_WS:-3001}/")"
 echo
-curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3210}/api/status" 2>/dev/null | head -c 300; echo
+# 新版 Agent 没有 /api/status；/api/overview 才是既有模型又有 OneBot 连接状态的那一个
+curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3081}/api/overview" 2>/dev/null | head -c 300; echo
 echo
 echo "下一步：bash $HERE/status.sh"

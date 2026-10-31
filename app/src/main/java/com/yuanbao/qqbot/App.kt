@@ -60,11 +60,17 @@ object Cfg {
     const val APT_SOURCE = "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
     const val APT_SOURCE_OFFICIAL = "http://ports.ubuntu.com/ubuntu-ports"
 
-    const val AGENT_GIT = "https://github.com/K0nd1us/QQ-agent.git"
+    // QQ Agent 源：原 K0nd1us/QQ-agent 已 404（仓库被删/转私有），改用这个替代仓库。
+    // 它是 TypeScript 项目：入口 src/index.ts，用 tsx 直跑或 tsc 编成 dist/src/index.js 后 node 跑。
+    // 默认面板 3081、默认连 OneBot ws://127.0.0.1:3001（正好等于 deploy.env 的 BOT_WS）。
+    // 注意：它自带一个「安装内置 SnowLuma」的按钮，上游固定 v1.14.22，与本项目装的 v2.1.1
+    // 会冲突 —— 本项目不使用该内置安装器，Agent 只作为 OneBot 客户端连项目自己的 SnowLuma。
+    const val AGENT_GIT = "https://github.com/shuang-ying/QQagent.git"
     const val SNOWLUMA_URL =
         "https://github.com/SnowLuma/SnowLuma/releases/download/v2.1.1/SnowLuma-v2.1.1-linux-arm64.tar.gz"
 
-    const val AGENT_PORT = 3210
+    // QQ Agent 的面板端口（config/app.yaml: server.port = 3081）
+    const val AGENT_PORT = 3081
     const val NOVNC_PORT = 6081
     const val SLWEBUI_PORT = 5099
 

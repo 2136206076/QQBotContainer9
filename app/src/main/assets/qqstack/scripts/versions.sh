@@ -9,7 +9,7 @@ ok(){ printf '  \033[32m✓\033[0m %-26s %s\n' "$1" "$2"; }
 bad(){ printf '  \033[31m✗\033[0m %-26s %s\n' "$1" "$2"; }
 info(){ printf '  · %-26s %s\n' "$1" "$2"; }
 echo "== 期望版本（实测可用组合）=="
-echo "    QQ 3.2.32-52194 arm64  +  SnowLuma 2.1.1 linux-arm64  +  QQ Agent 0.4.0"
+echo "    QQ 3.2.32-52194 arm64  +  SnowLuma 2.1.1 linux-arm64  +  QQ Agent 2.3.0（TypeScript 版）"
 echo
 echo "== 环境 =="
 info "内核/架构" "$(uname -m) / $(uname -r)"
@@ -27,15 +27,40 @@ QV=$(python3 -c "import json;print(json.load(open('$QQ_DIR/resources/app/package
 SV=$(python3 -c "import json;print(json.load(open('$SNOWLUMA_DIR/release.json'))['version'])" 2>/dev/null)
 ST=$(python3 -c "import json;print(json.load(open('$SNOWLUMA_DIR/release.json'))['target'])" 2>/dev/null)
 [ "$SV" = "2.1.1" ] && ok "SnowLuma" "$SV / $ST" || bad "SnowLuma" "${SV:-未安装}（期望 2.1.1 linux-arm64）"
+# QQ Agent 是 TypeScript 项目：就绪标志是 package.json + src/index.ts（不是老的 src/server.js）
 AV=$(python3 -c "import json;print(json.load(open('$AGENT_DIR/package.json'))['version'])" 2>/dev/null)
-[ -n "$AV" ] && ok "QQ Agent" "$AV" || bad "QQ Agent" "未安装（期望 0.4.0）"
+if [ -f "$AGENT_DIR/src/index.ts" ] && [ -n "$AV" ]; then
+  # 版本不是 2.3.0 不判死：上游发新版也是能用的，用 info 中性提示一句即可
+  [ "$AV" = "2.3.0" ] && ok "QQ Agent" "$AV" || info "QQ Agent" "$AV（实测可用版本是 2.3.0）"
+else
+  bad "QQ Agent" "未安装或不是 TypeScript 版（期望 2.3.0，入口 src/index.ts）"
+fi
+# 启动方式：部署时 npm run build 编出 dist 就走 node，否则退回 tsx。两种都能起，dist 更省内存
+if [ -f "$AGENT_DIR/dist/src/index.js" ]; then
+  info "Agent 启动方式" "node dist/src/index.js（已编译）"
+elif [ -x "$AGENT_DIR/node_modules/.bin/tsx" ]; then
+  info "Agent 启动方式" "tsx src/index.ts（未编译，靠 tsx 现编现跑）"
+else
+  bad "Agent 启动方式" "dist 和 tsx 都没有 —— 到 $AGENT_DIR 跑 npm install（必须全量，tsx 是 devDependency）"
+fi
 NV=$("$SNOWLUMA_DIR/node" -v 2>/dev/null)
 info "SnowLuma 自带 node" "${NV:-?}（期望 v24.22.1）"
+# 跑 Agent 的**系统** node 必须 ≥22.16.0：内置 SQLite 的 FTS5 和 DatabaseSync.isTransaction
+# 都是 22.16.0 才带上的，低版本起不来（no such module: fts5）。Ubuntu apt 的 18/20 都不够。
 SYSNV=$(node -v 2>/dev/null)
-case "$SYSNV" in
-  v2[0-9]*|v3[0-9]*) ok "系统 node（跑 Agent）" "$SYSNV（≥20 可以）" ;;
-  *) bad "系统 node（跑 Agent）" "${SYSNV:-缺失}（需 ≥20，Ubuntu apt 默认 18，要换 NodeSource 22）" ;;
-esac
+NODE_MIN=${NODE_MIN:-22.16.0}
+sys_node_ok() {
+  local cur
+  cur=$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9.]*\).*/\1/p')
+  [ -n "$cur" ] || return 1
+  # sort -V 做版本号比较：cur >= min 时排序后第一行是 min
+  [ "$(printf '%s\n%s\n' "$NODE_MIN" "$cur" | sort -V | head -n1)" = "$NODE_MIN" ]
+}
+if sys_node_ok; then
+  ok "系统 node（跑 Agent）" "$SYSNV（≥$NODE_MIN，够）"
+else
+  bad "系统 node（跑 Agent）" "${SYSNV:-缺失}（需 ≥$NODE_MIN，Ubuntu apt 默认 18/20，要换 NodeSource 22.x 或 24.x）"
+fi
 # ---- 配对校验（重点）----
 # 上面是逐项体检，这里做**联合判定**：QQ 和 SnowLuma 是硬配对的 —— 版本对不上
 # 的表现是「进程都起来了、但 SnowLuma 永远 awaiting readiness」，而且不报任何错，
@@ -119,7 +144,7 @@ info "QQ 进程" "$(pgrep -c -x qq 2>/dev/null || echo 0) 个"
 Q=$(pgrep -x qq 2>/dev/null | head -1)
 [ -n "$Q" ] && { grep -qa snowluma-linux-arm64.so /proc/$Q/maps && ok "hook 已注入" "是" || bad "hook 已注入" "否"; }
 info "OneBot ${BOT_HTTP:-3000}/${BOT_WS:-3001}" "$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${BOT_HTTP:-3000}/) / $(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${BOT_WS:-3001}/)"
-info "控制台 ${AGENT_PORT:-3210}" "$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${AGENT_PORT:-3210}/)"
+info "控制台 ${AGENT_PORT:-3081}" "$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${AGENT_PORT:-3081}/)"
 echo
 echo "注意：Android 的「幽灵进程杀手」在容器里查不到，请按文档用 adb 确认已关闭，"
 echo "      否则 QQ（十几个子进程）会在后台被系统悄悄杀掉。"

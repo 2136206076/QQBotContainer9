@@ -49,21 +49,43 @@ command -v curl >/dev/null && command -v python3 >/dev/null && command -v gcc >/
   && echo "  ✓ 系统包完成" \
   || { echo "  ✗ 关键包缺失（curl/python3/gcc）"; fail=1; }
 
-say "2. Node（Ubuntu 24.04 的 apt 源是 18.x，Agent 要 ≥20）"
-if node -v 2>/dev/null | grep -qE '^v(2[0-9]|3[0-9])'; then
-  echo "  ✓ 已装 $(node -v)"
-else
+say "2. Node（Ubuntu 24.04 的 apt 源是 18.x，QQ Agent 要 ≥${NODE_MIN:-22.16.0}）"
+# QQ Agent 的硬门槛是 22.16.0，不是 22：它用 Node 内置 SQLite，而 FTS5 与
+# DatabaseSync.isTransaction 这两个能力都是 22.16.0 才编进 Node 的
+# （22.13~22.15 会得到 "no such module: fts5"，数据库建不起来）。
+# 所以不能再用 ^v(2[0-9]|3[0-9]) 这种正则 —— v22.5 也能过，但照样起不来。
+# 用 sort -V 做真正的版本比较：cur >= min 时排序后第一行是 min。
+node_min_ok() {
+  local cur="${2:-}"
+  [ -n "$cur" ] || cur=$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9.]*\).*/\1/p')
+  [ -n "$cur" ] || return 1
+  [ "$(printf '%s\n%s\n' "${NODE_MIN:-22.16.0}" "$cur" | sort -V | head -n1)" = "${NODE_MIN:-22.16.0}" ]
+}
+install_node() {
+  # $1 = NodeSource 通道（22.x / 24.x）
   mkdir -p /etc/apt/keyrings
   if curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; then
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+    # 说明：NodeSource 的 node_22.x 是滚动通道，给的是当前最新的 22.x（≥22.16.0），
+    # 能满足 QQ Agent；万一哪天这个通道滞后了，下面还有 24.x 兜底。
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_$1 nodistro main" \
       >/etc/apt/sources.list.d/nodesource.list
     apt-get update -qq && apt-get install -y nodejs
   fi
-  if node -v 2>/dev/null | grep -qE '^v(2[0-9]|3[0-9])'; then
+}
+if node_min_ok; then
+  echo "  ✓ 已装 $(node -v)（≥${NODE_MIN:-22.16.0}，满足 QQ Agent）"
+else
+  echo "  · 当前 $(node -v 2>/dev/null || echo 未安装)，低于 ${NODE_MIN:-22.16.0}，装 NodeSource node_22.x"
+  install_node 22.x
+  if ! node_min_ok; then
+    echo "  · 22.x 通道给的版本仍不满足，改试 NodeSource node_24.x（LTS）"
+    install_node 24.x
+  fi
+  if node_min_ok; then
     echo "  ✓ $(node -v)"
   else
-    echo "  ✗ Node 22 安装失败"
+    echo "  ✗ Node ≥${NODE_MIN:-22.16.0} 安装失败（QQ Agent 会起不来：no such module: fts5）"
     fail=1
   fi
 fi
@@ -141,8 +163,9 @@ cat <<NEXT
   1) 放好三大件：
        /opt/QQ            （QQ 3.2.32-52194 arm64）
        /opt/snowluma      （SnowLuma 2.1.1 linux-arm64）
-       /opt/qqagent       （QQ Agent，node src/server.js 能起）
-  2) cd /opt/qqagent && npm install --omit=dev
+       /opt/qqagent       （QQ Agent 2.3.0，TypeScript 版，src/index.ts 能起）
+  2) cd /opt/qqagent && npm install（必须全量：tsx/typescript 是 devDependencies）
+     && npm run build（可选，编出 dist/src/index.js 后启动更省内存）
   3) python3 $HERE/../patch/patch_snowluma.py ${SNOWLUMA_DIR:-/opt/snowluma}/index.mjs
        退出码：0 = 正常（方案 A 结构化补丁成功 / 已打过跳过 / 按设计不用打）
                3 = ⚠ 降级到方案 B（替身文件兜底）—— 属降级成功，

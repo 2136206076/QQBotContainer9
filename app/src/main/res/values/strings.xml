@@ -29,7 +29,7 @@
     <string name="btn_crash">崩溃日志</string>
 
     <!-- 快捷入口 -->
-    <string name="btn_console">控制台 :3210</string>
+    <string name="btn_console">控制台 :3081</string>
     <string name="btn_vnc">扫码登录 :6081</string>
 
     <!-- 状态卡 -->

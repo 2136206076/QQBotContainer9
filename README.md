@@ -15,7 +15,7 @@
   [2/9] 写 resolv.conf / hosts（含屏蔽 QQ 热更新）/ apt 源
   [3/9] 把部署脚本放进容器 /opt/qqstack
   [4/9] apt 装包 + 换 Node 22 + 用 gcc 编出 hook 载入器     ← 最慢，5~15 分钟
-  [5/9] git clone QQ Agent + npm install
+  [5/9] git clone QQ Agent（TypeScript 版）+ npm install（全量）+ npm run build
   [6/9] 下载 SnowLuma 2.1.1 linux-arm64
   [7/9] 装 Linux 版 QQ（**这一步需要你给一个包**）
   [8/9] /proc/locks 补丁（能读就跳过）+ 路径别名 + 冻结热更新
@@ -108,7 +108,7 @@ App 开机自启已内置（`BootReceiver`），前提是部署标记存在。
 | 状态 | 各组件 + OneBot 连接 + 当前模型 |
 | 版本体检 | 逐项对照实测可用版本，✗ 就是要处理 |
 | hook 诊断 | hook 注入失败时抓现场（resident dispatch 那几行） |
-| 控制台 | 内置 WebView 开 `127.0.0.1:3210` |
+| 控制台 | 内置 WebView 开 `127.0.0.1:3081`（QQ Agent 面板） |
 | 扫码登录 | 内置 WebView 开 noVNC（`127.0.0.1:6081`，VNC 密码默认 `12345678`） |
 
 ---
@@ -135,7 +135,7 @@ tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 ```
 /opt/QQ          Linux 版 QQ
 /opt/snowluma    SnowLuma（5099 / 3000 / 3001）
-/opt/qqagent     QQ Agent（3210）
+/opt/qqagent     QQ Agent 2.3.0（面板 3081，连 OneBot ws://127.0.0.1:3001）
 /opt/qqstack/    libslhook.so、hook 载荷、scripts/、patch/、vncpasswd、run/*.pid
 ```
 
@@ -160,7 +160,46 @@ tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 
 ---
 
-## 8. 许可
+## 8. QQ Agent（大脑 / 控制台）
+
+App 在第 5 步自动克隆安装：**<https://github.com/shuang-ying/QQagent.git>**
+（原 `K0nd1us/QQ-agent` 仓库已 404，所以换了这个源）。
+
+它是**标准 OneBot v11 客户端**，默认连 `ws://127.0.0.1:3001` —— 正好等于
+`scripts/deploy.env` 里的 `BOT_WS`，也就是本项目自己管的 SnowLuma v2.1.1，
+天然对接，不用改任何地址。（如果你改了 `BOT_WS`，记得同步改
+`/opt/qqagent/config/app.yaml` 的 `napcat.url`。）
+
+| 项 | 值 |
+|---|---|
+| 类型 | **TypeScript** 项目（包名 `qq-agent`，版本 2.3.0），入口 `src/index.ts` |
+| 运行方式 | 部署时 `npm run build`（tsc）编出 `dist/src/index.js`，启动跑 `node dist/src/index.js`；没编出来就退回 `tsx src/index.ts`。用 dist 是为了省内存、启动快（手机环境），tsx 只作兜底 |
+| 依赖 | 必须**全量 `npm install`**：`tsx` / `typescript` 在 devDependencies，`--omit=dev` 装出来的树起不来 |
+| Node | **≥ 22.16.0**（硬门槛）：它用 Node 内置 SQLite，而 FTS5 和 `DatabaseSync.isTransaction` 都是 22.16.0 才编进 Node 的；低于它会直接 `no such module: fts5`。Ubuntu apt 的 18/20 都不够，部署第 4 步会自动换 NodeSource 22.x（不够再试 24.x） |
+| 面板 | `http://127.0.0.1:3081`（`config/app.yaml` 的 `server.port`，只监听 127.0.0.1） |
+| 日志 | `/tmp/qqagent.log` |
+
+**必须自备 LLM API Key**：它是个"接入任意 AI API 的壳"，自己不提供模型。
+支持 OpenAI 兼容 / Anthropic / Gemini / Ollama 等协议，在面板「模型接入」里填，
+或写到 `/opt/qqagent/.env`（参考 `.env.example`，变量名为 `providers.yaml` 里的 `apiKeyEnv`）。
+**没配 Key 它只是个空壳** —— 面板能开、QQ 能连上，但不会回复。
+
+**不要用它的内置 SnowLuma 安装器**：面板左侧 ❄ SnowLuma 页的「安装内置组件」
+会把**上游固定版本 v1.14.22** 下载到 `runtime/snowluma/`，与本项目装的
+**SnowLuma v2.1.1**（要和 QQ 3.2.32-52194 硬配对）冲突。本项目不使用该安装器 ——
+协议端由 App 自己管理，Agent 只作为 OneBot 客户端连上来（也就是上游说的"方案 A"）。
+
+状态里的 OneBot 连接情况取自 `/api/overview` 的 `runtime.napcatConnected` /
+`runtime.onebot.connected`，账号是 `runtime.selfId` / `runtime.nickname`
+（新版没有旧版的 `/api/status` 接口了）。
+
+> ⚠ **许可提示**：该仓库目前**未附开源许可文件**（其 README 原文："本仓库当前未附开源
+> 许可文件，在作者明确授权前默认保留所有权利"）。自用没问题；若要公开发布、二次分发或
+> 商业使用，请先联系原作者取得授权。
+
+---
+
+## 9. 许可
 
 App 自身代码随意使用。注意 **proot 是 GPL-2.0、libtalloc 是 LGPL-3.0**，
 你分发 APK 时需要同时提供这两个的源码（链接见 `app/src/main/jniLibs/README.md`）。

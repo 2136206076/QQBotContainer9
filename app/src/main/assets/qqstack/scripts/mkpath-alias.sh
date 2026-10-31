@@ -34,6 +34,12 @@ probe_root() {
 ROOT="$(probe_root)"
 if [ "${1:-}" = "--probe" ]; then echo "$ROOT"; exit 0; fi
 
+# 安全阀：ROOT 为空或就是 / 时，下面 ln -sfn 会把 /opt/qqagent 链成"自己链自己"
+# （那种坏链会让 git clone 报 "File exists"，部署第 5 步直接卡死），所以这里先挡掉
+case "$ROOT" in
+  ""|"/") echo "[alias] 探测到的宿主前缀不可用（'$ROOT'），跳过建别名"; exit 0 ;;
+esac
+
 echo "[alias] 宿主 rootfs 前缀 = $ROOT"
 mkdir -p "$ROOT" 2>/dev/null || { echo "[alias] 无法创建 $ROOT（容器内路径不可写？）"; exit 1; }
 

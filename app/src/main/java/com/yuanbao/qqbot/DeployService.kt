@@ -170,7 +170,8 @@ class DeployService : Service() {
         // 让人误以为全好了。这里把每一步的真实结果摊开：就绪的 ✓，没就绪的 ✗ + 该做什么。
         LogBus.log("========== 本次部署结果（清单）==========")
         reportComponent("QQ Agent（大脑）", agentOk,
-            "重跑部署；或手动：cd /opt/qqagent && git pull && npm install --omit=dev，再 node src/server.js 试起")
+            "重跑部署；或手动：cd /opt/qqagent && npm install（必须全量，tsx 是 devDependency）" +
+            " && npm run build，再 node dist/src/index.js（或 ./node_modules/.bin/tsx src/index.ts）试起")
         reportComponent("SnowLuma（协议端）", snowOk,
             "重跑部署；或手动下 SnowLuma-v2.1.1-linux-arm64.tar.gz 解到 /opt/snowluma（版本要和 QQ 配对）")
         reportComponent("Linux 版 QQ", qqOk,
