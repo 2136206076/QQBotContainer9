@@ -6,6 +6,7 @@
     <color name="brandSecondary">#00B0D8</color>
     <color name="brandPrimaryDark">#00A883</color>
     <color name="brandSecondaryDark">#0091B4</color>
+    <color name="ic_launcher_bg">#2C5FDA</color>
 
     <!-- ===== 背景层次 ===== -->
     <color name="bgScreen">#0F141B</color>
