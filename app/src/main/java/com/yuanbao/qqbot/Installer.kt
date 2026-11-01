@@ -180,50 +180,92 @@ object Installer {
     /**
      * 装 QQ Agent（TypeScript 版，源见 Cfg.AGENT_GIT）。
      *
-     * 三个和旧版不一样的关键点：
-     * 1. 就绪标志是 package.json + src/index.ts，不是老的 src/server.js —— 残留的旧目录
-     *    （或 clone 一半的目录）不能被误判成"已安装"。
-     * 2. 依赖必须全量 npm install：tsx 和 typescript 都在 devDependencies，
-     *    用 --omit=dev 装出来的树根本起不来（这是旧流程必失败的根因）。
-     * 3. 装完 best-effort 编一次 dist（tsc → dist/src/index.js）：运行时用 node 跑编译产物
+     * 部署关键设计：
+     * 1. 就绪标志是 package.json + src/index.ts + node_modules/.bin/tsx 三件套，
+     *    缺 tsx 视为"装了一半"，不会误判成已装而跳过（这是旧流程被坑的主因之一）。
+     * 2. 依赖必须全量 npm install（--include=optional，不 omit dev）：tsx/typescript 在
+     *    devDependencies，sharp 走 arm64 预编译包。关键修复：npm 退出码不再被 tail 吞掉，
+     *    改用 >/tmp/npm-i.log + ${'$'}? 透传真实退出码；并依次试 npmmirror → npmjs 两个镜像，
+     *    proot 内默认连 registry.npmjs.org 经常超时，正是第 5 步挂的真因。
+     * 3. clone 最多重试 3 次；[ -f /opt/qqagent/src/index.ts ] 才算成功。
+     * 4. 装完 best-effort 编一次 dist（tsc → dist/src/index.js）：运行时用 node 跑编译产物
      *    比 tsx 现编现跑省内存、启动快，手机环境差别明显。但 tsconfig 开了 noUnusedLocals，
      *    scripts/ 下测试脚本一有未用变量 tsc 就编不过，所以编译只做 best-effort
      *    —— 编不过不阻断部署，start-all.sh 会自动退回 tsx src/index.ts。
      */
     fun installAgent(ctx: Context): Boolean {
         val ok = Proot.run(ctx, """
-            if [ -f /opt/qqagent/package.json ] && [ -f /opt/qqagent/src/index.ts ]; then
-              echo "skip: /opt/qqagent 已是 TypeScript 版 QQ Agent"
+            # 跳过判定：package.json + src/index.ts + node_modules/.bin/tsx 三件套都在才跳过，
+            # 避免"装了一半"（缺 tsx）被误判成已装而跳过。
+            if [ -f /opt/qqagent/package.json ] && [ -f /opt/qqagent/src/index.ts ] && [ -x /opt/qqagent/node_modules/.bin/tsx ]; then
+              echo "skip: /opt/qqagent 已是完整 TypeScript 版 QQ Agent（含 tsx）"
+              echo "agent: ${'$'}(node -p "require('/opt/qqagent/package.json').version" 2>/dev/null || echo '?')"
               exit 0
             fi
+
             mkdir -p /opt && cd /opt
-            # 用 -e/-L 而不是 -d：/opt/qqagent 可能是个坏掉的软链接（自己链自己那种），
-            # 那种情况下 -d 为假、git clone 又会报 "File exists"，正好卡死在这一步
+
+            # 若存在但不齐（装了一半 / 残留 / 坏掉）：先 mv 成 .old-<时间戳> 再重装。
+            # mv 失败才 rm -rf，都失败才 exit 1。
             if [ -e /opt/qqagent ] || [ -L /opt/qqagent ]; then
-              echo "· /opt/qqagent 存在但不是新仓库（缺 src/index.ts），挪开后重新 clone"
-              # 先 mv（保留里面可能已有的 config/ —— API Key 之类的配置不跟着一起没），
-              # mv 不动（坏软链接、跨设备等）再 rm -rf
+              echo "· /opt/qqagent 存在但不齐（缺 package.json/src/index.ts/tsx），挪开后重新 clone"
               mv /opt/qqagent "/opt/qqagent.old-${'$'}(date +%s)" 2>/dev/null \
                 || rm -rf /opt/qqagent 2>/dev/null \
                 || { echo "✗ /opt/qqagent 挪不走，先手动删掉再重跑"; exit 1; }
             fi
-            echo "↓ git clone ${Cfg.AGENT_GIT}（约 2~3MB）"
-            git clone --depth 1 ${Cfg.AGENT_GIT} qqagent 2>&1 | tail -8
-            [ -f /opt/qqagent/src/index.ts ] || { echo "clone 失败（仓库不可达？）"; exit 1; }
+
+            # clone 重试，最多 3 次；[ -f /opt/qqagent/src/index.ts ] 才算成功
+            echo "↓ git clone ${Cfg.AGENT_GIT}（约 2~3MB，最多重试 3 次）"
+            CLONE_OK=0
+            for i in 1 2 3; do
+              echo "· 第 ${'$'}i 次 clone…"
+              git clone --depth 1 ${Cfg.AGENT_GIT} qqagent 2>&1 | tail -8
+              if [ -f /opt/qqagent/src/index.ts ]; then CLONE_OK=1; break; fi
+              echo "⚠ 第 ${'$'}i 次 clone 未拿到 src/index.ts，稍后重试"
+            done
+            [ "${'$'}CLONE_OK" -eq 1 ] || { echo "✗ clone 失败（仓库不可达？重试 3 次均失败）"; exit 1; }
+
             cd /opt/qqagent || exit 1
             # API Key 模板：面板「模型接入」也能填，这里只是给用户一个落点（全注释，不影响运行）
             [ -f .env ] || cp .env.example .env 2>/dev/null || true
+
             echo "node: ${'$'}(node -v 2>/dev/null || echo '未安装')（QQ Agent 要 ≥22.16.0：低版本内置 SQLite 没有 FTS5，会报 no such module: fts5）"
-            echo "· npm install（必须全量：tsx/typescript 是 devDependencies；sharp 走 arm64 预编译包，可能要几分钟）…"
-            npm install --no-audit --no-fund 2>&1 | tail -12
-            [ -x node_modules/.bin/tsx ] || { echo "✗ 依赖不完整：没装到 tsx（看上面 npm 报错）"; exit 1; }
+
+            # npm 安装加固：先设好重试次数与超时，再依次尝试镜像
+            npm config set fetch-retries 5 >/dev/null 2>&1
+            npm config set fetch-timeout 120000 >/dev/null 2>&1
+
+            echo "· npm install（全量；sharp 走 arm64 预编译包，可能要几分钟；依次试 npmmirror → npmjs）…"
+            INSTALL_OK=0
+            for REG in https://registry.npmmirror.com https://registry.npmjs.org; do
+              echo "· 用镜像 ${'$'}REG 安装…"
+              npm install --no-audit --no-fund --include=optional --registry="${'$'}REG" >/tmp/npm-i.log 2>&1
+              rc=${'$'}?
+              if [ "${'$'}rc" -ne 0 ]; then
+                echo "⚠ ${'$'}REG 安装失败（退出码 ${'$'}rc），真实错误："
+                tail -15 /tmp/npm-i.log
+                continue
+              fi
+              if [ -x node_modules/.bin/tsx ]; then
+                INSTALL_OK=1
+                echo "✓ ${'$'}REG 安装成功（已就绪 tsx）"
+                break
+              fi
+              echo "⚠ ${'$'}REG 装完但没有 node_modules/.bin/tsx，换镜像重试"
+            done
+
+            [ "${'$'}INSTALL_OK" -eq 1 ] || {
+              echo "✗ 两个镜像都装不出 node_modules/.bin/tsx（最后一次 npm 退出码见上）。"
+              echo "  建议：挂代理 / 换 WiFi（proot 内默认连 registry.npmjs.org 经常超时）后，重跑「一键部署第 5 步」。"
+              exit 1;
+            }
+
             echo "· npm run build（tsc → dist/src/index.js；编不过也没关系，会退回 tsx）…"
             npm run build 2>&1 | tail -5
-            build_rc=${'$'}{PIPESTATUS[0]}
-            if [ "${'$'}build_rc" -eq 0 ] && [ -f dist/src/index.js ]; then
+            if [ -f dist/src/index.js ]; then
               echo "✓ 已编译 dist/src/index.js（启动走 node，省内存、启动快）"
             else
-              echo "⚠ tsc 编译未通过（退出码 ${'$'}build_rc）—— 不阻断部署，运行时改用 tsx src/index.ts"
+              echo "⚠ tsc 编译未通过 —— 不阻断部署，运行时改用 tsx src/index.ts"
             fi
             echo "agent: ${'$'}(node -p "require('./package.json').version" 2>/dev/null || echo '?')"
         """.trimIndent(), tag = "agent")
