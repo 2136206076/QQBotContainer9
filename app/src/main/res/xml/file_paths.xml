@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 的可见范围。
+  只暴露「导出的日志」这一个目录：日志写在 getExternalFilesDir(null)/logs
+  （external-files-path），当外部存储不可用时退回 filesDir/logs（files-path）。
+  不要把范围放大到整个私有目录 —— 那里有一两个 GB 的 rootfs，
+  虽然 FileProvider 只按 URI 授权、不会越权，但按最小暴露原则没必要带进来。
+  也绝不使用 <root-path>，那等于把整块存储开放给接收方。
+-->
+<paths>
+    <external-files-path name="logs" path="logs/" />
+    <files-path name="logs_internal" path="logs/" />
+</paths>

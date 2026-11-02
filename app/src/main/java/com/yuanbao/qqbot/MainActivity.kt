@@ -25,6 +25,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.progressindicator.LinearProgressIndicator
 import kotlin.concurrent.thread
@@ -159,6 +160,7 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.btnKeep).setOnClickListener { showKeepAlive() }
         findViewById<Button>(R.id.btnCrash).setOnClickListener { showCrash() }
+        findViewById<Button>(R.id.btnExportLog).setOnClickListener { exportLog() }
 
         try { checkProot() } catch (e: Throwable) {
             tvLog.append("proot 检查失败：${e.message}\n")
@@ -425,6 +427,123 @@ class MainActivity : AppCompatActivity() {
             }
             .setPositiveButton(R.string.dlg_crash_close, null)
             .show()
+    }
+
+    // ================= 日志导出 =================
+
+    /**
+     * 导出日志：拼状态快照 → 写文件 → 弹对话框。
+     *
+     * 全程在后台线程做：快照要读 rootfs 里的 package.json / release.json，
+     * 主线程读小文件也会掉帧；写 20 万字符的日志更不能放主线程。
+     */
+    private fun exportLog() {
+        // 连点两次会各弹一个对话框；文件名只精确到秒，同一秒还会互相覆盖。
+        // 一次导出不到百毫秒，按按钮禁用最省事。
+        val btn = findViewById<Button>(R.id.btnExportLog)
+        if (!btn.isEnabled) return
+        btn.isEnabled = false
+        thread(name = "log-export") {
+            var file: File? = null
+            var err = ""
+            try {
+                file = LogExporter.export(this, buildSnapshotText())
+            } catch (e: Throwable) {
+                // LogExporter 内部已经吞掉了大部分异常，能漏到这里的是极端情况（如 OOM）
+                err = e.message ?: e.javaClass.simpleName
+            }
+            val f = file
+            runOnUiThread {
+                // 先恢复按钮，再判存活：导出失败时用户要能立刻重试
+                btn.isEnabled = true
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                if (f != null) {
+                    showExportDialog(f)
+                } else {
+                    val msg = if (err.isNotBlank()) err else getString(R.string.st_unknown)
+                    Toast.makeText(
+                        this,
+                        getString(R.string.toast_export_fail, msg),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun showExportDialog(f: File) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dlg_export_title)
+            .setMessage(getString(R.string.dlg_export_msg, f.absolutePath))
+            .setNeutralButton(R.string.dlg_export_copy) { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("log", LogBus.text()))
+                Toast.makeText(this, R.string.toast_copied, Toast.LENGTH_SHORT).show()
+            }
+            .setPositiveButton(R.string.dlg_export_share) { _, _ -> shareLog(f) }
+            .setNegativeButton(R.string.dlg_export_close, null)
+            .show()
+    }
+
+    /** FileProvider 授权临时读权限后交给系统选择器；没有接收方时不能崩 */
+    private fun shareLog(f: File) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+            val i = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "Q鱼罐头 运行日志")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            // 有些 OEM 的 chooser 不透传内层 Intent 的授权 flag，选择器本身也补一份，
+            // 否则接收方拿到 uri 却没有读权限，分享出去是个打不开的空文件。
+            val chooser = Intent.createChooser(i, getString(R.string.dlg_export_share)).apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(chooser)
+        } catch (e: Throwable) {
+            Toast.makeText(
+                this,
+                getString(R.string.toast_export_fail, e.message ?: e.javaClass.simpleName),
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /**
+     * 把状态卡的 5 项探针拍成文本，供日志文件头使用。
+     *
+     * 探针会读文件、解析 JSON，任何一个抛异常都只影响自己那一行；
+     * 整个快照失败也只降级成一行说明 —— 绝不能因为「状态读不出来」就导不出日志，
+     * 那种情况下日志恰恰最有用。
+     */
+    private fun buildSnapshotText(): String = try {
+        val root = Proot.rootfs(this)
+        val s = Snapshot(
+            rootfs = probeRootfs(root),
+            qq = probeQQ(root),
+            snow = probeSnowLuma(root),
+            payload = probePayload(root),
+            agent = probeAgent(root)
+        )
+        buildString {
+            append("Ubuntu rootfs : ").appendLine(probeLine(s.rootfs))
+            append("Linux QQ      : ").appendLine(probeLine(s.qq))
+            append("SnowLuma      : ").appendLine(probeLine(s.snow))
+            append("resident 载荷 : ").appendLine(probeLine(s.payload))
+            append("QQ Agent      : ").appendLine(probeLine(s.agent))
+        }.trimEnd()
+    } catch (e: Throwable) {
+        "（状态读取失败：${e.message ?: e.javaClass.simpleName}）"
+    }
+
+    private fun probeLine(p: Probe): String = "${levelSymbol(p.level)} ${p.text}"
+
+    private fun levelSymbol(l: Level): String = when (l) {
+        Level.OK -> "✓"
+        Level.WARN -> "⚠"
+        Level.OFF -> "–"
+        Level.ERR -> "✗"
     }
 
     private fun checkProot() {

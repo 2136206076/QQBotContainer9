@@ -437,17 +437,49 @@
         android:background="@drawable/bg_log"
         android:orientation="vertical">
 
-        <TextView
+        <!--
+          日志标题行：左边是原标题，右边挂一个「导出」小按钮。
+          外层只负责水平排列 + 垂直居中，所有原 TextView 的内边距都留在左边那一个上，
+          这样视觉上跟改造前一致（标题基线不会被按钮撑开）。
+          注意：tvLog / svLog 的 id 与嵌套层级保持不变，MainActivity 直接 findViewById。
+        -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingStart="10dp"
-            android:paddingTop="8dp"
-            android:paddingEnd="10dp"
-            android:paddingBottom="4dp"
-            android:text="@string/log_title"
-            android:textColor="@color/textSecondary"
-            android:textSize="11sp"
-            android:textStyle="bold" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical"
+                android:layout_weight="1"
+                android:paddingStart="10dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="4dp"
+                android:text="@string/log_title"
+                android:textColor="@color/textSecondary"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnExportLog"
+                style="@style/Widget.App.Button"
+                android:layout_width="wrap_content"
+                android:layout_height="30dp"
+                android:layout_marginEnd="10dp"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="@string/btn_export_log"
+                android:textSize="11sp" />
+        </LinearLayout>
 
         <ScrollView
             android:id="@+id/svLog"
