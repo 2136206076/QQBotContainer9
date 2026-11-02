@@ -13,8 +13,10 @@ android {
         targetSdk 34
         // v1.1：签名从此固定（见 keystore/qfish-debug.jks）。
         // 从 v1.0 升上来必须卸载重装一次 —— 旧包是 CI 每次现生成的证书，对不上。
-        versionCode 2
-        versionName "1.1"
+        // v1.2：QQ Agent 换代（旧的 TypeScript 版 → 内置原版 0.4.0 离线包），
+        //       版本号跳一位，方便用户确认装上的确实是新版。
+        versionCode 3
+        versionName "1.2"
         // 只做 arm64：QQ / SnowLuma / hook 都是 aarch64
         ndk { abiFilters 'arm64-v8a' }
     }

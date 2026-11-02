@@ -60,11 +60,13 @@ object Cfg {
     const val APT_SOURCE = "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
     const val APT_SOURCE_OFFICIAL = "http://ports.ubuntu.com/ubuntu-ports"
 
-    // QQ Agent 源：原 K0nd1us/QQ-agent 已 404（仓库被删/转私有），改用这个替代仓库。
-    // 它是 TypeScript 项目：入口 src/index.ts，用 tsx 直跑或 tsc 编成 dist/src/index.js 后 node 跑。
-    // 默认面板 3081、默认连 OneBot ws://127.0.0.1:3001（正好等于 deploy.env 的 BOT_WS）。
-    // 注意：它自带一个「安装内置 SnowLuma」的按钮，上游固定 v1.14.22，与本项目装的 v2.1.1
-    // 会冲突 —— 本项目不使用该内置安装器，Agent 只作为 OneBot 客户端连项目自己的 SnowLuma。
+    // 【已弃用，仅为兼容保留】旧流程的 QQ Agent 源地址。
+    // 现在第 5 步改成装内置包（assets/qqstack/agent/qqagent.tar.gz，原版 qq-agent v0.4.0，
+    // 纯 JS + ESM，入口 src/server.js，依赖 ws/js-yaml/undici 已随包内置），
+    // 不再 clone 任何仓库、也不再 npm install —— 上面那个 TypeScript 仓库本身不稳定，
+    // 一旦再 404 整个第 5 步就装不出来。这个常量目前全项目已无引用点，
+    // 但先不删：万一还有地方按字符串引用（或需要回滚），留着比删掉安全。
+    @Deprecated("已改用内置离线包 qqstack/agent/qqagent.tar.gz，不再从 git 克隆")
     const val AGENT_GIT = "https://github.com/shuang-ying/QQagent.git"
     const val SNOWLUMA_URL =
         "https://github.com/SnowLuma/SnowLuma/releases/download/v2.1.1/SnowLuma-v2.1.1-linux-arm64.tar.gz"

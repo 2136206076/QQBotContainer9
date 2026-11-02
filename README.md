@@ -33,7 +33,7 @@
   [2/9] 写 resolv.conf / hosts（含屏蔽 QQ 热更新）/ apt 源
   [3/9] 把部署脚本放进容器 /opt/qqstack
   [4/9] apt 装包 + 换 Node 22 + 用 gcc 编出 hook 载入器     ← 最慢，5~15 分钟
-  [5/9] git clone QQ Agent（TypeScript 版）+ npm install（全量）+ npm run build
+  [5/9] 安装 QQ Agent（内置 2.7MB 离线包直接解压：免联网 / 免 npm install / 免编译）
   [6/9] 下载 SnowLuma 2.1.1 linux-arm64
   [7/9] 装 Linux 版 QQ（**这一步需要你给一个包**）
   [8/9] /proc/locks 补丁（能读就跳过）+ 路径别名 + 冻结热更新
@@ -153,8 +153,9 @@ tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 ```
 /opt/QQ          Linux 版 QQ
 /opt/snowluma    SnowLuma（5099 / 3000 / 3001）
-/opt/qqagent     QQ Agent 2.3.0（面板 3081，连 OneBot ws://127.0.0.1:3001）
+/opt/qqagent     QQ Agent 0.4.0（原版纯 JS，入口 src/server.js；面板 3081，连 OneBot ws://127.0.0.1:3001）
 /opt/qqstack/    libslhook.so、hook 载荷、scripts/、patch/、vncpasswd、run/*.pid
+/opt/qqstack/agent/qqagent.tar.gz   内置的 QQ Agent 离线包（第 5 步从这里解压）
 ```
 
 ---
@@ -180,26 +181,78 @@ tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 
 ## 8. QQ Agent（大脑 / 控制台）
 
-App 在第 5 步自动克隆安装：**<https://github.com/shuang-ying/QQagent.git>**
-（原 `K0nd1us/QQ-agent` 仓库已 404，所以换了这个源）。
+第 5 步从 App 内置的离线包 `assets/qqstack/agent/qqagent.tar.gz`（**2.7MB / 572 个文件**）
+直接解压到 `/opt/qqagent`：**不 clone、不 `npm install`、不编译**——三个纯 JS 依赖
+（`js-yaml` / `undici` / `ws`）已经打好在这个包的 `node_modules` 里，解压完
+`node src/server.js` 就能起。这一步因此从「看网速」变成「看磁盘」：可重复、可离线，
+包坏了重跑一次第 5 步就行。
 
-它是**标准 OneBot v11 客户端**，默认连 `ws://127.0.0.1:3001` —— 正好等于
-`scripts/deploy.env` 里的 `BOT_WS`，也就是本项目自己管的 SnowLuma v2.1.1，
-天然对接，不用改任何地址。（如果你改了 `BOT_WS`，记得同步改
-`/opt/qqagent/config/app.yaml` 的 `napcat.url`。）
+它是**标准 OneBot v11 客户端**，默认连 `ws://127.0.0.1:3001` + `http://127.0.0.1:3000` ——
+正好等于 `scripts/deploy.env` 里的 `BOT_WS` / `BOT_HTTP`，也就是本项目自己管的
+SnowLuma v2.1.1，天然对接，不用改任何地址。
 
 | 项 | 值 |
 |---|---|
-| 类型 | **TypeScript** 项目（包名 `qq-agent`，版本 2.3.0），入口 `src/index.ts` |
-| 运行方式 | 部署时 `npm run build`（tsc）编出 `dist/src/index.js`，启动跑 `node dist/src/index.js`；没编出来就退回 `tsx src/index.ts`。用 dist 是为了省内存、启动快（手机环境），tsx 只作兜底 |
-| 依赖 | 必须**全量 `npm install`**：`tsx` / `typescript` 在 devDependencies，`--omit=dev` 装出来的树起不来 |
-| Node | **≥ 22.16.0**（硬门槛）：它用 Node 内置 SQLite，而 FTS5 和 `DatabaseSync.isTransaction` 都是 22.16.0 才编进 Node 的；低于它会直接 `no such module: fts5`。Ubuntu apt 的 18/20 都不够，部署第 4 步会自动换 NodeSource 22.x（不够再试 24.x） |
-| 面板 | `http://127.0.0.1:3081`（`config/app.yaml` 的 `server.port`，只监听 127.0.0.1） |
+| 类型 | **原版纯 JavaScript**（ESM，包名 `qq-agent`，版本 **0.4.0**），入口 `src/server.js` |
+| 安装方式 | 解压 App 内置离线包（**无需联网、无需 `npm install`、无需编译**） |
+| 依赖 | `js-yaml` / `undici` / `ws` 已随包内置（`/opt/qqagent/node_modules/`） |
+| Node | **≥ 20**（它 `package.json` 的 `engines` 就是 `>=20`；22.16.0 是旧 TypeScript 版的要求，内置版不需要，22.13.1 实测能正常起） |
+| 面板 | `http://127.0.0.1:3081`（`/opt/qqagent/data/config.json` 的 `server.port`，只监听 127.0.0.1） |
+| 配置 | `/opt/qqagent/data/config.json`（第 5 步生成；`loadConfig` = 内置默认值 + 这个文件深合并，所以只写要改的字段） |
 | 日志 | `/tmp/qqagent.log` |
+
+面板端口不用手改两份：第 5 步会读 `scripts/deploy.env` 的 `AGENT_PORT` / `BOT_WS` /
+`BOT_HTTP` 写进 `config.json`。**改 `deploy.env` 之后重跑一次第 5 步**（或手改
+`config.json` 里对应的值），两边对上即可 —— 对不上时症状是面板一直「未运行」，
+而且每次启动都会重复拉起。
+
+### 出厂默认关掉的「主动行为」
+
+包里这 5 个插件默认是**开**的。装上就替用户给他的好友发消息、自动发说说显然不能是默认值，
+所以第 5 步生成的配置把它们全关了：
+
+| `config.json` → `skills` 键 | 默认 | 关掉的是什么 |
+|---|---|---|
+| `silence-ping` | `enabled: false` | 主动私信（原默认每 15~30 分钟给白名单里所有私聊对象发一条，每天最多 20 条） |
+| `qzone-diary` | `enabled: false`、`autoGenerate: false` | 每 72 小时自动往 QQ 空间发说说 |
+| `mood-qzone` | `signatureEnabled: false`、`qzoneEnabled: false` | 每天自动改个性签名、发说说 |
+| `douyin-scroll` | `enabled: false` | 自己去刷抖音（点赞 / 评论 / 分享 / 回私信） |
+| `self-surf` | `enabled: false` | 自己上网搜话题再发出来 |
+
+要用哪个，就去面板左侧的「插件 / 技能」页逐个打开（改完即生效）——打开之后机器人会**真的**
+用你的 QQ 号做这些事，包括给你的好友发私信，请自己确认清楚再开。
+
+部署生成的默认配置就是下面这份（原文是单行，这里是格式化后的样子；可以拿去
+`python3 -m json.tool` 验一下）：
+
+```json
+{
+  "server": { "port": 3081 },
+  "onebot": { "wsUrl": "ws://127.0.0.1:3001", "httpUrl": "http://127.0.0.1:3000" },
+  "skills": {
+    "silence-ping": { "enabled": false },
+    "qzone-diary": { "enabled": false, "autoGenerate": false },
+    "mood-qzone": { "signatureEnabled": false, "qzoneEnabled": false },
+    "douyin-scroll": { "enabled": false },
+    "self-surf": { "enabled": false }
+  }
+}
+```
+
+### 从旧版（TypeScript 版）升上来
+
+第 5 步发现 `/opt/qqagent` 不是内置版时，会先整目录 `mv` 到 `/opt/qqagent.old-<时间戳>`
+（日志里会打出**实际路径**），再解压新版。旧版的会话 / 记忆 / 人设都在它的 `data/` 里，
+**新版目录结构不同、不能直接用**；要留档就在终端里 `cp -a /opt/qqagent.old-*/data /sdcard/`，
+不需要就 `rm -rf` 掉省空间。
+
+API Key 会自动迁移：依次找 旧 `data/config.json` 的 `api.{baseUrl,apiKey,model}` →
+`.env`（解析 `KEY=VALUE`，含 `export` / 引号 / 注释）→ `config/app.yaml`（用 python3 的 yaml
+解析），三个字段齐全才写入；三处都没找到会在日志里提示，去面板「模型接入」重填即可。
 
 **必须自备 LLM API Key**：它是个"接入任意 AI API 的壳"，自己不提供模型。
 支持 OpenAI 兼容 / Anthropic / Gemini / Ollama 等协议，在面板「模型接入」里填，
-或写到 `/opt/qqagent/.env`（参考 `.env.example`，变量名为 `providers.yaml` 里的 `apiKeyEnv`）。
+或写到 `/opt/qqagent/.env`（参考包里的 `.env.example`，变量名为 `providers.yaml` 里的 `apiKeyEnv`）。
 **没配 Key 它只是个空壳** —— 面板能开、QQ 能连上，但不会回复。
 
 **不要用它的内置 SnowLuma 安装器**：面板左侧 ❄ SnowLuma 页的「安装内置组件」
@@ -211,9 +264,9 @@ App 在第 5 步自动克隆安装：**<https://github.com/shuang-ying/QQagent.g
 `runtime.onebot.connected`，账号是 `runtime.selfId` / `runtime.nickname`
 （新版没有旧版的 `/api/status` 接口了）。
 
-> ⚠ **许可提示**：该仓库目前**未附开源许可文件**（其 README 原文："本仓库当前未附开源
-> 许可文件，在作者明确授权前默认保留所有权利"）。自用没问题；若要公开发布、二次分发或
-> 商业使用，请先联系原作者取得授权。
+> ⚠ **许可提示**：内置包来自上游 **<https://github.com/Kondius/qq-agent>**（v0.4.0 原版），
+> 包里带了它自己的 `LICENSE`（MIT，Copyright (c) 2026 Kondius）。二次分发时请一并保留。
+> 之前的 TypeScript 分支（`shuang-ying/QQagent`）本项目已不再使用。
 
 ---
 

@@ -163,9 +163,9 @@ cat <<NEXT
   1) 放好三大件：
        /opt/QQ            （QQ 3.2.32-52194 arm64）
        /opt/snowluma      （SnowLuma 2.1.1 linux-arm64）
-       /opt/qqagent       （QQ Agent 2.3.0，TypeScript 版，src/index.ts 能起）
-  2) cd /opt/qqagent && npm install（必须全量：tsx/typescript 是 devDependencies）
-     && npm run build（可选，编出 dist/src/index.js 后启动更省内存）
+       /opt/qqagent       （QQ Agent 0.4.0，原版 JS，入口 src/server.js）
+  2) /opt/qqagent 由部署第 5 步用内置包解压得到（离线，不需要 npm install，也不需要编译）
+     手动重装：tar xzf ${STACK_DIR:-/opt/qqstack}/agent/qqagent.tar.gz -C /opt/qqagent
   3) python3 $HERE/../patch/patch_snowluma.py ${SNOWLUMA_DIR:-/opt/snowluma}/index.mjs
        退出码：0 = 正常（方案 A 结构化补丁成功 / 已打过跳过 / 按设计不用打）
                3 = ⚠ 降级到方案 B（替身文件兜底）—— 属降级成功，

@@ -367,9 +367,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun probeAgent(root: File): Probe = try {
-        // QQ Agent 是 TypeScript 项目：就绪标志是 package.json + src/index.ts（不是老的 src/server.js）
-        if (File(root, "opt/qqagent/package.json").exists() && File(root, "opt/qqagent/src/index.ts").exists())
-            Probe(Level.OK, "就绪")
+        // QQ Agent 现在是原版纯 JavaScript（内置离线包）：就绪标志是 src/server.js + node_modules/ws
+        // （依赖已随包内置，缺 ws 说明只解压了一半）。旧的 TypeScript 版 src/index.ts 已弃用，
+        // 这里不再认它 —— 否则老容器里的残留目录会被误判成"就绪"。
+        val entry = File(root, "opt/qqagent/src/server.js")
+        val dep = File(root, "opt/qqagent/node_modules/ws")
+        if (entry.exists() && dep.exists()) Probe(Level.OK, "就绪")
         else Probe(Level.OFF, "未安装")
     } catch (e: Throwable) {
         Probe(Level.ERR, getString(R.string.st_unknown))

@@ -9,7 +9,7 @@ ok(){ printf '  \033[32m✓\033[0m %-26s %s\n' "$1" "$2"; }
 bad(){ printf '  \033[31m✗\033[0m %-26s %s\n' "$1" "$2"; }
 info(){ printf '  · %-26s %s\n' "$1" "$2"; }
 echo "== 期望版本（实测可用组合）=="
-echo "    QQ 3.2.32-52194 arm64  +  SnowLuma 2.1.1 linux-arm64  +  QQ Agent 2.3.0（TypeScript 版）"
+echo "    QQ 3.2.32-52194 arm64  +  SnowLuma 2.1.1 linux-arm64  +  QQ Agent 0.4.0（原版 JS，内置离线包）"
 echo
 echo "== 环境 =="
 info "内核/架构" "$(uname -m) / $(uname -r)"
@@ -27,39 +27,45 @@ QV=$(python3 -c "import json;print(json.load(open('$QQ_DIR/resources/app/package
 SV=$(python3 -c "import json;print(json.load(open('$SNOWLUMA_DIR/release.json'))['version'])" 2>/dev/null)
 ST=$(python3 -c "import json;print(json.load(open('$SNOWLUMA_DIR/release.json'))['target'])" 2>/dev/null)
 [ "$SV" = "2.1.1" ] && ok "SnowLuma" "$SV / $ST" || bad "SnowLuma" "${SV:-未安装}（期望 2.1.1 linux-arm64）"
-# QQ Agent 是 TypeScript 项目：就绪标志是 package.json + src/index.ts（不是老的 src/server.js）
+# QQ Agent 是原版纯 JavaScript 项目（内置离线包装的）：就绪标志是 src/server.js + node_modules/ws
 AV=$(python3 -c "import json;print(json.load(open('$AGENT_DIR/package.json'))['version'])" 2>/dev/null)
-if [ -f "$AGENT_DIR/src/index.ts" ] && [ -n "$AV" ]; then
-  # 版本不是 2.3.0 不判死：上游发新版也是能用的，用 info 中性提示一句即可
-  [ "$AV" = "2.3.0" ] && ok "QQ Agent" "$AV" || info "QQ Agent" "$AV（实测可用版本是 2.3.0）"
+if [ -f "$AGENT_DIR/src/server.js" ] && [ -n "$AV" ]; then
+  # 版本不是 0.4.0 不判死：上游发新版也是能用的，用 info 中性提示一句即可
+  [ "$AV" = "0.4.0" ] && ok "QQ Agent" "$AV（原版 JS）" || info "QQ Agent" "$AV（实测可用版本是 0.4.0）"
 else
-  bad "QQ Agent" "未安装或不是 TypeScript 版（期望 2.3.0，入口 src/index.ts）"
+  bad "QQ Agent" "未安装或不是内置版（期望 0.4.0，入口 src/server.js）"
 fi
-# 启动方式：部署时 npm run build 编出 dist 就走 node，否则退回 tsx。两种都能起，dist 更省内存
-if [ -f "$AGENT_DIR/dist/src/index.js" ]; then
-  info "Agent 启动方式" "node dist/src/index.js（已编译）"
-elif [ -x "$AGENT_DIR/node_modules/.bin/tsx" ]; then
-  info "Agent 启动方式" "tsx src/index.ts（未编译，靠 tsx 现编现跑）"
+# 启动方式只有一种：node src/server.js（依赖 ws/js-yaml/undici 已随内置包打好，无需联网也无需编译）
+if [ -f "$AGENT_DIR/src/server.js" ]; then
+  if [ -d "$AGENT_DIR/node_modules/ws" ]; then
+    info "Agent 启动方式" "node src/server.js（内置依赖已就位，无需联网 / 无需编译）"
+  else
+    bad "Agent 依赖" "缺 $AGENT_DIR/node_modules/ws → 重跑部署第 5 步（离线解压内置包）"
+  fi
 else
-  bad "Agent 启动方式" "dist 和 tsx 都没有 —— 到 $AGENT_DIR 跑 npm install（必须全量，tsx 是 devDependency）"
+  bad "Agent 启动方式" "缺 src/server.js → 重跑部署第 5 步（离线解压内置包）"
 fi
 NV=$("$SNOWLUMA_DIR/node" -v 2>/dev/null)
 info "SnowLuma 自带 node" "${NV:-?}（期望 v24.22.1）"
-# 跑 Agent 的**系统** node 必须 ≥22.16.0：内置 SQLite 的 FTS5 和 DatabaseSync.isTransaction
-# 都是 22.16.0 才带上的，低版本起不来（no such module: fts5）。Ubuntu apt 的 18/20 都不够。
+# 跑 Agent 的**系统** node 门槛是 **≥20**：内置版是原版纯 JS（它的 package.json 里
+# engines 写的就是 >=20），完全不碰 node:sqlite —— 所以 22.16.0 那个门槛（旧 TypeScript
+# 版的「内置 SQLite FTS5 / DatabaseSync.isTransaction」才需要）**已经不需要了**，
+# 实测 22.13.1 也能正常起。
+# 部署脚本（proot-bootstrap.sh）仍按 deploy.env 的 NODE_MIN 装 22.x（保守：装新不装旧），
+# 但「体检」以 AGENT_NODE_MIN 为准，免得明明能跑却报 ✗ 让人白折腾。
 SYSNV=$(node -v 2>/dev/null)
-NODE_MIN=${NODE_MIN:-22.16.0}
+AGENT_NODE_MIN=${AGENT_NODE_MIN:-20}
 sys_node_ok() {
   local cur
   cur=$(node -v 2>/dev/null | sed -n 's/^v\([0-9][0-9.]*\).*/\1/p')
   [ -n "$cur" ] || return 1
   # sort -V 做版本号比较：cur >= min 时排序后第一行是 min
-  [ "$(printf '%s\n%s\n' "$NODE_MIN" "$cur" | sort -V | head -n1)" = "$NODE_MIN" ]
+  [ "$(printf '%s\n%s\n' "$AGENT_NODE_MIN" "$cur" | sort -V | head -n1)" = "$AGENT_NODE_MIN" ]
 }
 if sys_node_ok; then
-  ok "系统 node（跑 Agent）" "$SYSNV（≥$NODE_MIN，够）"
+  ok "系统 node（跑 Agent）" "$SYSNV（≥$AGENT_NODE_MIN，够）"
 else
-  bad "系统 node（跑 Agent）" "${SYSNV:-缺失}（需 ≥$NODE_MIN，Ubuntu apt 默认 18/20，要换 NodeSource 22.x 或 24.x）"
+  bad "系统 node（跑 Agent）" "${SYSNV:-缺失}（内置版需 ≥$AGENT_NODE_MIN；22.16 是旧 TS 版的要求，内置版不需要）"
 fi
 # ---- 配对校验（重点）----
 # 上面是逐项体检，这里做**联合判定**：QQ 和 SnowLuma 是硬配对的 —— 版本对不上

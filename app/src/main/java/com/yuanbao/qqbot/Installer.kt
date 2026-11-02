@@ -264,96 +264,323 @@ object Installer {
     }
 
     /**
-     * 装 QQ Agent（TypeScript 版，源见 Cfg.AGENT_GIT）。
+     * 装 QQ Agent（原版 qq-agent v0.4.0，纯 JavaScript + ESM，入口 src/server.js）。
      *
-     * 部署关键设计：
-     * 1. 就绪标志是 package.json + src/index.ts + node_modules/.bin/tsx 三件套，
-     *    缺 tsx 视为"装了一半"，不会误判成已装而跳过（这是旧流程被坑的主因之一）。
-     * 2. 依赖必须全量 npm install（--include=optional，不 omit dev）：tsx/typescript 在
-     *    devDependencies，sharp 走 arm64 预编译包。关键修复：npm 退出码不再被 tail 吞掉，
-     *    改用 >/tmp/npm-i.log + ${'$'}? 透传真实退出码；并依次试 npmmirror → npmjs 两个镜像，
-     *    proot 内默认连 registry.npmjs.org 经常超时，正是第 5 步挂的真因。
-     * 3. clone 最多重试 3 次；[ -f /opt/qqagent/src/index.ts ] 才算成功。
-     * 4. 装完 best-effort 编一次 dist（tsc → dist/src/index.js）：运行时用 node 跑编译产物
-     *    比 tsx 现编现跑省内存、启动快，手机环境差别明显。但 tsconfig 开了 noUnusedLocals，
-     *    scripts/ 下测试脚本一有未用变量 tsc 就编不过，所以编译只做 best-effort
-     *    —— 编不过不阻断部署，start-all.sh 会自动退回 tsx src/index.ts。
+     * 为什么改成「内置包离线安装」：
+     * 1. 旧流程走 clone + npm install + tsc 三步联网操作，proot 里连 registry.npmjs.org
+     *    经常超时（要依次试镜像、还要编译），第 5 步因此成了整条部署链最不可靠的一环；
+     *    而且那个 TypeScript 仓库本身也不稳定，随时可能再 404。
+     * 2. 内置包 qqstack/agent/qqagent.tar.gz 已把 3 个纯 JS 依赖（js-yaml/undici/ws）
+     *    打进 node_modules，所以**不用 clone、不用 npm install、不用编译**，解压完
+     *    `node src/server.js` 就能起 —— 部署从「看网速」变成「看磁盘」，可重复、可离线。
+     * 3. 就绪标志（三件套）：src/server.js + node_modules/ws + package.json。
+     *    三者齐全才是可用的内置版；缺一个都按「旧版/残留」挪开重装，不会误判成已装而跳过。
+     *
+     * 下面几条是踩过的坑，改的时候别退回去：
+     * - **解压失败必须清掉半装目录**（P0-1）：截断的包（磁盘满 / 写入被打断在收尾）能解出
+     *   src/server.js + node_modules/ws + package.json —— 恰好凑齐三件套，下次复跑就
+     *   「skip: 已是内置版」，于是永远装不起来。失败分支先 rm -rf 再 exit。
+     * - **迁移临时文件（/tmp/qqagent-old-config.json 等）用后即删**（P0-2）：留着它，
+     *   下一次「全新安装」（没有旧目录）会把上一轮的旧 API Key 无提示套进新配置。进来先删一遍，走完再删一遍。
+     * - **出厂配置默认静默**（P0-3）：包里的 silence-ping / qzone-diary / mood-qzone /
+     *   douyin-scroll / self-surf 默认全开，新用户一填 Key，机器人就会主动私聊他的好友、
+     *   每 72 小时自动发说说 —— 那是替用户做社交动作，绝不能当默认值。
+     * - **端口/地址读 deploy.env**（P0-4）：用户改过 AGENT_PORT 时若还写死 3081，
+     *   面板起在 3081、脚本探 3001，症状是永远「未运行」且每次启动都重复拉起。
+     * - **旧版备份要说清后果**（P1-5）：只打一句「挪开后重装」，用户既不知道数据去哪了，
+     *   也不知道新版读不了旧 data/。
+     * - **API Key 迁移要认旧版真实位置**（P1-6）：旧版是 TypeScript 项目，配置在
+     *   config/app.yaml、Key 在 .env（变量名由 providers.yaml 的 apiKeyEnv 决定）；
+     *   data/config.json 只有在面板里填过 Key 的容器才有 —— 只认它等于大概率静默失败。
      */
     fun installAgent(ctx: Context): Boolean {
+        // 只重跑第 5 步时 /opt/qqstack/agent 可能还没被复制过去（那是第 3 步做的事），
+        // 这里补一次：assetCopy 幂等，包只有 2.7MB，代价远小于「包缺失 → 部署失败」。
+        try {
+            val agentAssets = File(Proot.rootfs(ctx), "opt/qqstack/agent")
+            if (!File(agentAssets, "qqagent.tar.gz").exists()) {
+                assetCopy(ctx, "qqstack/agent", agentAssets)
+            }
+        } catch (e: Throwable) { CrashHandler.record("installAgent.seed", e) }
+
         val ok = Proot.run(ctx, """
-            # 跳过判定：package.json + src/index.ts + node_modules/.bin/tsx 三件套都在才跳过，
-            # 避免"装了一半"（缺 tsx）被误判成已装而跳过。
-            if [ -f /opt/qqagent/package.json ] && [ -f /opt/qqagent/src/index.ts ] && [ -x /opt/qqagent/node_modules/.bin/tsx ]; then
-              echo "skip: /opt/qqagent 已是完整 TypeScript 版 QQ Agent（含 tsx）"
+            # ---- 端口 / 地址：以 deploy.env 为准（用户可能改过 AGENT_PORT / BOT_WS / BOT_HTTP）----
+            # deploy.env 内部都是 ${'$'}{XXX:-默认值} 写法，重复 source 是幂等的。
+            [ -f /opt/qqstack/scripts/deploy.env ] && . /opt/qqstack/scripts/deploy.env 2>/dev/null || true
+            AG_PORT_TPL="${'$'}{AGENT_PORT:-3081}"
+            BOT_WS_TPL="${'$'}{BOT_WS:-3001}"
+            BOT_HTTP_TPL="${'$'}{BOT_HTTP:-3000}"
+
+            # 这两个路径**写死**、不跟 deploy.env 走：Kotlin 侧 installScripts() 固定把
+            # assets/qqstack 复制到 /opt/qqstack，两边不一致就会「找不到包」。
+            AGENT_DIR=/opt/qqagent
+            PKG=/opt/qqstack/agent/qqagent.tar.gz
+
+            # 迁移用的三个临时文件（旧 data/config.json / .env / config/app.yaml 的副本）。
+            # 进门先删一遍：上一轮万一没删干净，留着它会把上一轮的旧 API Key 无提示地套到
+            # 这一次「全新安装」上 —— 用户根本没有旧目录，却凭空多出一个 Key。
+            OLD_CFG=/tmp/qqagent-old-config.json
+            OLD_ENV=/tmp/qqagent-old-env
+            OLD_YAML=/tmp/qqagent-old-app.yaml
+            rm -f "${'$'}OLD_CFG" "${'$'}OLD_ENV" "${'$'}OLD_YAML" 2>/dev/null || true
+
+            # 跳过判定：内置版三件套（入口 server.js + 内置依赖 ws + package.json）都在才跳过。
+            # 之所以带上 node_modules/ws：只解压了一半（比如磁盘满、被 kill）时 server.js 可能已在，
+            # 但依赖不齐起不来 —— 那样跳过去就是留个坏装。
+            if [ -f "${'$'}AGENT_DIR/src/server.js" ] && [ -d "${'$'}AGENT_DIR/node_modules/ws" ] && [ -f "${'$'}AGENT_DIR/package.json" ]; then
+              echo "skip: 已是内置版 QQ Agent（原版 JS，免联网）"
+              # 上一版 APK 装出来的 config.json 里没有 skills 段 —— 那 5 个主动插件还是默认开着的
+              # （新用户一填 Key 就会被动私聊好友）。只在「整个 skills 段都不存在」时补一次默认值：
+              # 用户只要动过任何一项（哪怕改回开启），skills 段就在，这里绝不再覆盖他的选择。
+              if [ -f "${'$'}AGENT_DIR/data/config.json" ] && ! grep -q '"skills"' "${'$'}AGENT_DIR/data/config.json" 2>/dev/null; then
+                python3 - "${'$'}AGENT_DIR/data/config.json" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict) or 'skills' in data:
+    sys.exit(0)
+data['skills'] = {
+    'silence-ping': {'enabled': False},
+    'qzone-diary': {'enabled': False, 'autoGenerate': False},
+    'mood-qzone': {'signatureEnabled': False, 'qzoneEnabled': False},
+    'douyin-scroll': {'enabled': False},
+    'self-surf': {'enabled': False}
+}
+try:
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+except Exception:
+    sys.exit(0)
+print('· 老配置里没有 skills 段，已补上「主动行为默认关闭」（重启 QQ Agent 后生效；要在面板里按需开启）')
+PY
+              fi
               echo "agent: ${'$'}(node -p "require('/opt/qqagent/package.json').version" 2>/dev/null || echo '?')"
               exit 0
             fi
 
-            mkdir -p /opt && cd /opt
-
-            # 若存在但不齐（装了一半 / 残留 / 坏掉）：先 mv 成 .old-<时间戳> 再重装。
-            # mv 失败才 rm -rf，都失败才 exit 1。
-            if [ -e /opt/qqagent ] || [ -L /opt/qqagent ]; then
-              echo "· /opt/qqagent 存在但不齐（缺 package.json/src/index.ts/tsx），挪开后重新 clone"
-              mv /opt/qqagent "/opt/qqagent.old-${'$'}(date +%s)" 2>/dev/null \
-                || rm -rf /opt/qqagent 2>/dev/null \
-                || { echo "✗ /opt/qqagent 挪不走，先手动删掉再重跑"; exit 1; }
+            if [ ! -f "${'$'}PKG" ]; then
+              echo "✗ 内置包缺失：${'$'}PKG（请重跑「一键部署」第 3 步）"
+              exit 1
             fi
 
-            # clone 重试，最多 3 次；[ -f /opt/qqagent/src/index.ts ] 才算成功
-            echo "↓ git clone ${Cfg.AGENT_GIT}（约 2~3MB，最多重试 3 次）"
-            CLONE_OK=0
-            for i in 1 2 3; do
-              echo "· 第 ${'$'}i 次 clone…"
-              git clone --depth 1 ${Cfg.AGENT_GIT} qqagent 2>&1 | tail -8
-              if [ -f /opt/qqagent/src/index.ts ]; then CLONE_OK=1; break; fi
-              echo "⚠ 第 ${'$'}i 次 clone 未拿到 src/index.ts，稍后重试"
-            done
-            [ "${'$'}CLONE_OK" -eq 1 ] || { echo "✗ clone 失败（仓库不可达？重试 3 次均失败）"; exit 1; }
-
-            cd /opt/qqagent || exit 1
-            # API Key 模板：面板「模型接入」也能填，这里只是给用户一个落点（全注释，不影响运行）
-            [ -f .env ] || cp .env.example .env 2>/dev/null || true
-
-            echo "node: ${'$'}(node -v 2>/dev/null || echo '未安装')（QQ Agent 要 ≥22.16.0：低版本内置 SQLite 没有 FTS5，会报 no such module: fts5）"
-
-            # npm 安装加固：先设好重试次数与超时，再依次尝试镜像
-            npm config set fetch-retries 5 >/dev/null 2>&1
-            npm config set fetch-timeout 120000 >/dev/null 2>&1
-
-            echo "· npm install（全量；sharp 走 arm64 预编译包，可能要几分钟；依次试 npmmirror → npmjs）…"
-            INSTALL_OK=0
-            for REG in https://registry.npmmirror.com https://registry.npmjs.org; do
-              echo "· 用镜像 ${'$'}REG 安装…"
-              npm install --no-audit --no-fund --include=optional --registry="${'$'}REG" >/tmp/npm-i.log 2>&1
-              rc=${'$'}?
-              if [ "${'$'}rc" -ne 0 ]; then
-                echo "⚠ ${'$'}REG 安装失败（退出码 ${'$'}rc），真实错误："
-                tail -15 /tmp/npm-i.log
-                continue
+            # 旧版/残留：先 mv 成 .old-<时间戳>（留个后悔药），mv 失败才 rm -rf，都失败才退出。
+            if [ -e "${'$'}AGENT_DIR" ] || [ -L "${'$'}AGENT_DIR" ]; then
+              echo "· ${'$'}AGENT_DIR 存在但不是内置版，挪开后重装"
+              # 旧版的 API Key 可能藏在三个地方（顺序同下面的迁移段），mv 之前各捞一份到 /tmp。
+              # 只拷不解析：解析统一交给下面那一个 python 脚本，省得 shell 里再写一遍引号转义。
+              [ -f "${'$'}AGENT_DIR/data/config.json" ] && cp "${'$'}AGENT_DIR/data/config.json" "${'$'}OLD_CFG" 2>/dev/null || true
+              [ -f "${'$'}AGENT_DIR/.env" ] && cp "${'$'}AGENT_DIR/.env" "${'$'}OLD_ENV" 2>/dev/null || true
+              [ -f "${'$'}AGENT_DIR/config/app.yaml" ] && cp "${'$'}AGENT_DIR/config/app.yaml" "${'$'}OLD_YAML" 2>/dev/null || true
+              OLD_DIR="/opt/qqagent.old-${'$'}(date +%s)"
+              if mv "${'$'}AGENT_DIR" "${'$'}OLD_DIR" 2>/dev/null; then
+                # 把「备份到哪」和「后果」都说清楚：旧数据不能直接用，别让用户以为升级后
+                # 会话/记忆/人设还在（新版目录结构完全不同，读了也不会认）。
+                echo "· 旧版（TypeScript 版）已整目录备份到：${'$'}OLD_DIR"
+                echo "  旧版的会话/记忆/人设在 data/ 里，新版结构不同**不能直接用**；"
+                echo "  需要留档就从「日志导出」旁边的终端进去拷走（cp -a ${'$'}OLD_DIR/data /sdcard/），不需要就 rm -rf 掉省空间。"
+              elif rm -rf "${'$'}AGENT_DIR" 2>/dev/null; then
+                echo "· 旧目录挪不动（/opt 空间可能不够），已直接删除，没有留备份"
+              else
+                echo "✗ ${'$'}AGENT_DIR 挪不走也删不掉，先手动删掉再重跑"
+                rm -f "${'$'}OLD_CFG" "${'$'}OLD_ENV" "${'$'}OLD_YAML" 2>/dev/null || true
+                exit 1
               fi
-              if [ -x node_modules/.bin/tsx ]; then
-                INSTALL_OK=1
-                echo "✓ ${'$'}REG 安装成功（已就绪 tsx）"
-                break
-              fi
-              echo "⚠ ${'$'}REG 装完但没有 node_modules/.bin/tsx，换镜像重试"
-            done
+            fi
 
-            [ "${'$'}INSTALL_OK" -eq 1 ] || {
-              echo "✗ 两个镜像都装不出 node_modules/.bin/tsx（最后一次 npm 退出码见上）。"
-              echo "  建议：挂代理 / 换 WiFi（proot 内默认连 registry.npmjs.org 经常超时）后，重跑「一键部署第 5 步」。"
-              exit 1;
+            mkdir -p "${'$'}AGENT_DIR" || exit 1
+            echo "⇱ 解压内置包（2.7MB / 572 个文件，免联网）…"
+            # 解压失败（包被截断 / 磁盘满 / 写入被打断）时**必须**先把半装目录清掉再退出：
+            # 截断的包照样能解出 src/server.js + node_modules/ws + package.json 三件套，
+            # 留着它下次复跑就直接「skip: 已是内置版」，用户永远装不起来。
+            tar -xzf "${'$'}PKG" -C "${'$'}AGENT_DIR" || {
+              echo "✗ 解压失败（包损坏或磁盘满），已清理半装目录，重跑即可"
+              rm -rf "${'$'}AGENT_DIR" 2>/dev/null || true
+              exit 1
+            }
+            [ -f "${'$'}AGENT_DIR/src/server.js" ] || {
+              echo "✗ 解压后没有 src/server.js（包内容不对），已清理，重跑「一键部署」第 3 步"
+              rm -rf "${'$'}AGENT_DIR" 2>/dev/null || true
+              exit 1
             }
 
-            echo "· npm run build（tsc → dist/src/index.js；编不过也没关系，会退回 tsx）…"
-            npm run build 2>&1 | tail -5
-            if [ -f dist/src/index.js ]; then
-              echo "✓ 已编译 dist/src/index.js（启动走 node，省内存、启动快）"
-            else
-              echo "⚠ tsc 编译未通过 —— 不阻断部署，运行时改用 tsx src/index.ts"
+            # data/ 是刻意从包里剔出去的（里面有打包者的真实 API Key），这里现场造一个。
+            # 只写要覆盖的字段：loadConfig 是 deepMerge(DEFAULT_CONFIG, 文件内容)，
+            # 其余默认值自动补齐，所以不需要抄一份完整配置。
+            #
+            # skills 那一段是**出厂静默**：包里这 5 个插件默认是开的（silence-ping 会每
+            # 15~30 分钟主动私聊用户的好友、最多 20 条/天，qzone-diary 每 72 小时自动发说说，
+            # mood-qzone 每天改签名+发说说，douyin-scroll 自己去刷，self-surf 自己上网）。
+            # 装完立刻替用户给他的好友发消息不能是默认行为 —— 要用的人去面板里自己开。
+            mkdir -p "${'$'}AGENT_DIR/data"
+            if [ ! -f "${'$'}AGENT_DIR/data/config.json" ]; then
+              printf '{"server":{"port":%s},"onebot":{"wsUrl":"ws://127.0.0.1:%s","httpUrl":"http://127.0.0.1:%s"},"skills":{"silence-ping":{"enabled":false},"qzone-diary":{"enabled":false,"autoGenerate":false},"mood-qzone":{"signatureEnabled":false,"qzoneEnabled":false},"douyin-scroll":{"enabled":false},"self-surf":{"enabled":false}}}' "${'$'}AG_PORT_TPL" "${'$'}BOT_WS_TPL" "${'$'}BOT_HTTP_TPL" > "${'$'}AGENT_DIR/data/config.json"
+              echo "· 已写默认配置：端口 ${'$'}AG_PORT_TPL，OneBot ws://127.0.0.1:${'$'}BOT_WS_TPL / http://127.0.0.1:${'$'}BOT_HTTP_TPL"
+              echo "· 已默认关闭「主动私信 / 自动发说说 / 抖音滚动 / 自己上网」（避免替你的好友发消息），可在面板里按需开启"
             fi
-            echo "agent: ${'$'}(node -p "require('./package.json').version" 2>/dev/null || echo '?')"
+
+            # ---- API Key 迁移（best-effort，绝不阻断部署）----
+            # 旧版（shuang-ying/QQagent，TypeScript）根本不读 data/config.json：
+            #   配置在 config/app.yaml（server.port / napcat.url），Key 在 .env
+            #   （变量名由 providers.yaml 的 apiKeyEnv 指定）。data/config.json 只有在面板里
+            #   填过 Key 的容器才有 —— 所以按三个来源依次探测，任一凑齐 baseUrl+apiKey+model
+            #   就写入。只搬半截（有 model 没 key）反而会让面板显示「已配置」却调不通，比留空
+            #   更难查，所以三字段必须齐全才写。
+            # 为什么整段交给 python：config 是嵌套 JSON、.env 要处理 export/引号/注释、
+            # app.yaml 得真解析 YAML —— sed 干不了这件事。
+            if [ -f "${'$'}OLD_CFG" ] || [ -f "${'$'}OLD_ENV" ] || [ -f "${'$'}OLD_YAML" ]; then
+              python3 - "${'$'}OLD_CFG" "${'$'}OLD_ENV" "${'$'}OLD_YAML" "${'$'}AGENT_DIR/data/config.json" <<'PY'
+import json, os, sys
+
+old_cfg, old_env, old_yaml, new_cfg = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+DQ = chr(34)
+SQ = chr(39)
+
+def read_text(path):
+    if not path or not os.path.isfile(path):
+        return ''
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    except Exception:
+        return ''
+
+def norm(url, key, model):
+    out = {'baseUrl': str(url or '').strip(), 'apiKey': str(key or '').strip(), 'model': str(model or '').strip()}
+    if out['baseUrl'] and out['apiKey'] and out['model']:
+        return out
+    return {}
+
+def from_json(path):
+    try:
+        api = (json.loads(read_text(path)) or {}).get('api') or {}
+    except Exception:
+        return {}
+    if not isinstance(api, dict):
+        return {}
+    return norm(api.get('baseUrl'), api.get('apiKey'), api.get('model'))
+
+def parse_env(text):
+    vals = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].strip()
+        if '=' not in line:
+            continue
+        name, value = line.split('=', 1)
+        name = name.strip().upper()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in (DQ, SQ):
+            value = value[1:-1]
+        elif ' #' in value:
+            value = value.split(' #', 1)[0].strip()
+        if name and value:
+            vals[name] = value
+    return vals
+
+def from_env(text):
+    vals = parse_env(text)
+    names = list(vals.keys())
+    base, key, model = '', '', ''
+    for name in names:
+        if not base and ('BASE_URL' in name or 'API_BASE' in name):
+            base = vals[name]
+        if not model and (name == 'MODEL' or name.endswith('_MODEL')):
+            model = vals[name]
+    for name in names:
+        if not key and ('API_KEY' in name or 'APIKEY' in name):
+            key = vals[name]
+    if not key:
+        for name in names:
+            if 'KEY' in name:
+                key = vals[name]
+                break
+    return norm(base, key, model)
+
+def from_yaml(path):
+    text = read_text(path)
+    if not text:
+        return {}
+    try:
+        import yaml
+    except Exception:
+        print('· 容器里的 python3 没有 yaml 模块，跳过 config/app.yaml 这条来源')
+        return {}
+    try:
+        data = yaml.safe_load(text) or {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    base, key, model = '', '', ''
+    api = data.get('api')
+    if isinstance(api, dict):
+        base = api.get('baseUrl') or api.get('base_url') or ''
+        key = api.get('apiKey') or api.get('api_key') or ''
+        model = api.get('model') or ''
+    providers = data.get('providers')
+    if isinstance(providers, dict):
+        for name in providers:
+            one = providers.get(name)
+            if not isinstance(one, dict):
+                continue
+            if not base:
+                base = one.get('baseUrl') or one.get('base_url') or ''
+            if not key:
+                key = one.get('apiKey') or one.get('api_key') or ''
+            if not model:
+                model = one.get('model') or ''
+    return norm(base, key, model)
+
+def merge(source, picked):
+    try:
+        data = json.loads(read_text(new_cfg) or '{}')
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    api = data.get('api')
+    if not isinstance(api, dict):
+        api = {}
+    api['baseUrl'] = picked['baseUrl']
+    api['apiKey'] = picked['apiKey']
+    api['model'] = picked['model']
+    data['api'] = api
+    try:
+        with open(new_cfg, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print('· 旧配置迁移失败（新配置写不进去：%s），请在面板「模型接入」重新填 API Key' % e)
+        return False
+    print('✓ 已从旧版 %s 迁移 API Key（baseUrl / model 一并带过来）' % source)
+    return True
+
+sources = (
+    ('data/config.json', lambda: from_json(old_cfg)),
+    ('.env', lambda: from_env(read_text(old_env))),
+    ('config/app.yaml', lambda: from_yaml(old_yaml))
+)
+for source, load in sources:
+    picked = load()
+    if picked and merge(source, picked):
+        sys.exit(0)
+
+print('· 没找到可迁移的旧配置（找过 data/config.json / .env / config/app.yaml），请在面板「模型接入」重新填 API Key')
+PY
+            fi
+            # 无论迁移成功、失败，还是压根没走到（上面 if 不成立）都清掉：这三个文件就是
+            # 「上一轮的旧 Key」，留着它等于给下一次全新安装埋雷。
+            rm -f "${'$'}OLD_CFG" "${'$'}OLD_ENV" "${'$'}OLD_YAML" 2>/dev/null || true
+
+            echo "agent: ${'$'}(node -p "require('/opt/qqagent/package.json').version" 2>/dev/null || echo '?')"
+            echo "启动方式: node src/server.js（依赖已内置，免联网安装、免编译）"
         """.trimIndent(), tag = "agent")
         return ok == 0
     }

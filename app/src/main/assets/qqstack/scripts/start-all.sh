@@ -51,9 +51,9 @@ pgrep -f "websockif[y]" >/dev/null 2>&1 || {
 # 重启一次让它们重扫；QQ 与 Xvfb 不动，登录态不丢。
 #
 # 但「QQ 在跑 + 协议端在跑」不等于「没连上」：用户可能只是重开面板、或休眠后回来，
-# 这时 overview 里早就 connected+accountReady 都为真了，再重启协议端纯属打断正常工作
-# （OneBot 掉线、正在跑的对话全断）。所以先问一句 overview：确认已连接就跳过。
-# 查询失败（控制台没起 / 非 JSON / 字段缺失）一律保守重启 —— 宁可多重启一次，
+# 这时控制台的 OneBot 早就连上了，再重启协议端纯属打断正常工作
+# （OneBot 掉线、正在跑的对话全断）。所以先问一句控制台的 /api/onebot/groups：200 就跳过。
+# 查询失败（控制台没起 / 502 / 超时）一律保守重启 —— 宁可多重启一次，
 # 也别让「扫完码却一直未连接」这个原始 bug 复发。
 SL_DIR="${SNOWLUMA_DIR:-/opt/snowluma}"
 SL_PIDFILE="$RUN/snowluma.pid"
@@ -85,14 +85,35 @@ sl_pids() {
   printf '%s' "$out"
 }
 
-# overview 已连上（connected 且 accountReady 都为真）→ 别打断
-# python 只留单行 -c：多行 -c 在 sh/bash 里转义太容易踩坑，出错就 return 1（= 保守重启）
+# 控制台（原版 qq-agent）没有 /api/overview（那是上一版 TypeScript 分支才有的接口，
+# 现在用不上了）。原版能查 OneBot 连接态的就只有 /api/onebot/groups：
+#   200 → 已连上（能取到群列表）
+#   502 → 控制台活着但 OneBot 没连上（body 里有 error 原因）
+#   000 → 控制台根本没响应
+# 只有 200 才算「已连上」，其余一律保守重启。curl -m 5 是硬上限：
+# 控制台没起时是立即 ECONNREFUSED，不会挂住；真卡住也最多 5s。
 sl_already_connected() {
-  local ov="" st=""
-  ov="$(curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3081}/api/overview" 2>/dev/null || true)"
-  [ -n "$ov" ] || return 1
-  st="$(printf '%s' "$ov" | python3 -c "import sys,json;d=json.load(sys.stdin);rt=d.get('runtime') or {};ob=rt.get('onebot') or {};c=rt.get('napcatConnected');c=ob.get('connected') if c is None else c;print('ready' if (c is True and ob.get('accountReady') is True) else 'notready')" 2>/dev/null || true)"
-  [ "$st" = "ready" ]
+  local c=""
+  c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${AGENT_PORT:-3081}/api/onebot/groups" 2>/dev/null || true)"
+  [ "$c" = "200" ]
+}
+
+# 控制台进程判据：启动统一用绝对入口 node /opt/qqagent/src/server.js，
+# 所以 /proc/<pid>/cmdline 里必然含 qqagent/src/server.js，一个 pgrep 就能命中。
+# 顺手把老容器里可能残留的旧版（qqagent/src/index.js|index.ts）也算进来，好一起清掉。
+# 注意 1：pgrep -f 用的是 ERE，分组必须写 (js|ts)；\| 是 BRE 的写法，在 ERE 里匹配不到。
+# 注意 2：pgrep -f 只匹配命令行，`bash -c '... server.js'`、`tail -f .../server.js` 也会命中，
+#   拿去 kill 就是误杀。所以逐个看 /proc/<pid>/comm，只认真正的 JS 运行时（node/nodejs/tsx…）。
+agent_pids() {
+  local x c=""
+  for x in $(pgrep -f 'qqagent/src/server\.js|qqagent/src/index\.(js|ts)' 2>/dev/null); do
+    read -r c < "/proc/$x/comm" 2>/dev/null || c=""
+    case "$c" in
+      node|nodejs|tsx|bun|deno) printf '%s ' "$x" ;;
+      *) : ;;
+    esac
+  done
 }
 
 need_restart=0
@@ -100,7 +121,7 @@ if pgrep -x qq >/dev/null 2>&1 && [ -n "$(sl_pids)" ]; then
   need_restart=1
   if sl_already_connected; then
     need_restart=0
-    say "QQ 与协议端都在跑，overview 显示已连接（accountReady=true）→ 跳过重启，不打断"
+    say "QQ 与协议端都在跑，OneBot groups 返回 200（已连上）→ 跳过重启，不打断"
   fi
 fi
 
@@ -108,17 +129,18 @@ if [ "$need_restart" = "1" ]; then
   say "QQ 已在运行 → 重启协议端以重新识别账号（QQ 登录态保留）"
   for x in $(sl_pids); do kill "$x" 2>/dev/null || true; done
   # 控制台是 OneBot 客户端，一起重启可立刻重连，不用等 1s→30s 退避。
-  # pidfile 只当线索：/proc/<pid>/cmdline 里含 index.js / index.ts 才杀，防 PID 复用误杀无辜进程
-  AG_KILL_PID=""
+  # 主判据是 pgrep 命中绝对入口 qqagent/src/server.js；pidfile 只当补充线索
+  # （cmdline 里必须真有 server.js/index.js/index.ts 才认，防 PID 复用误杀无辜进程）。
+  AG_KILL_PIDS="$(agent_pids)"
   if [ -f "$RUN/qqagent.pid" ]; then
     ap="$(tr -dc '0-9' < "$RUN/qqagent.pid" 2>/dev/null || true)"
-    if [ -n "$ap" ] && grep -qa -e 'index\.js' -e 'index\.ts' "/proc/$ap/cmdline" 2>/dev/null; then
-      kill "$ap" 2>/dev/null || true
-      AG_KILL_PID="$ap"
+    if [ -n "$ap" ] && grep -qa -e 'server\.js' -e 'index\.js' -e 'index\.ts' "/proc/$ap/cmdline" 2>/dev/null; then
+      case " $AG_KILL_PIDS " in *" $ap "*) ;; *) AG_KILL_PIDS="$AG_KILL_PIDS$ap " ;; esac
     elif [ -n "$ap" ]; then
       say "· 控制台 pidfile 已失效（pid $ap 早已不是控制台进程），跳过 kill"
     fi
   fi
+  for ap in $AG_KILL_PIDS; do kill "$ap" 2>/dev/null || true; done
   # 有界等待：最多 10s。以前只 sleep 2，而 SnowLuma 收到 SIGTERM 后可能 3s 才退，
   # 2s 后 pgrep 仍命中 → 以为「还在跑」就跳过重启 → 旧进程随后真死，协议端与控制台双停
   i=0
@@ -129,13 +151,19 @@ if [ "$need_restart" = "1" ]; then
     sleep 1
   fi
   # 被杀的旧控制台也要等它让出 3081，否则新实例绑不上端口（5s 后仍赖着就 -9）
-  if [ -n "$AG_KILL_PID" ]; then
+  if [ -n "$AG_KILL_PIDS" ]; then
     i=0
-    while [ "$i" -lt 5 ] && [ -d "/proc/$AG_KILL_PID" ]; do sleep 1; i=$((i+1)); done
-    if [ -d "/proc/$AG_KILL_PID" ]; then
-      kill -9 "$AG_KILL_PID" 2>/dev/null || true
-      sleep 1
-    fi
+    while [ "$i" -lt 5 ]; do
+      left=0
+      for ap in $AG_KILL_PIDS; do [ -d "/proc/$ap" ] && left=$((left + 1)); done
+      [ "$left" -eq 0 ] && break
+      sleep 1; i=$((i+1))
+    done
+    still=0
+    for ap in $AG_KILL_PIDS; do
+      [ -d "/proc/$ap" ] && { kill -9 "$ap" 2>/dev/null || true; still=1; }
+    done
+    [ "$still" = "1" ] && sleep 1
   fi
   rm -f "$SL_PIDFILE" "$RUN/qqagent.pid"
   SL_RESTARTED=1
@@ -236,34 +264,34 @@ else
   say "QQ 已在运行，跳过"
 fi
 
-# ---------- 5) 控制台（QQ Agent，TypeScript 项目）----------
-# 启动方式二选一，优先编译产物：
-#   node dist/src/index.js   —— 部署时 npm run build（tsc）编出来的，纯 node 跑，省内存、启动快
-#   tsx src/index.ts         —— 官方 npm start 的用法，现编现跑；dist 没编出来时兜底
-# 不强制依赖 dist：tsconfig 开了 noUnusedLocals，scripts/ 下测试脚本一有未用变量 tsc 就编不过，
-# 把"控制台能不能起来"押在编译上不划算，所以两条路都留着。
+# ---------- 5) 控制台（QQ Agent，原版 JS，内置包离线安装）----------
+# 入口固定是 /opt/qqagent/src/server.js：纯 JavaScript + ESM，node 直接跑。
+# 依赖（ws / js-yaml / undici）已经内置在包的 node_modules 里 —— 不需要 npm install，
+# 没有 dist/，也没有 tsx，所以这里只有一个分支，不再判断启动方式的优先级。
+#
+# 为什么用绝对入口 node /opt/qqagent/src/server.js 而不是相对路径：
+#   相对路径启动后 cmdline 里只有 "node src/server.js"，不含 qqagent/，
+#   stop-all.sh 与本节第 2 步的 pgrep 判据（qqagent/src/server\.js）就抓不到进程。
+#   用绝对入口则 cmdline 里必然带 qqagent/src/server.js，判据最稳。
+#   仍然先 cd 到该目录：它内部按相对路径找 ui/、data/ 这些资源。
+#
 # 顺序说明：Agent 是 OneBot 客户端，主动连 SnowLuma 的正向 WS（默认 ws://127.0.0.1:3001，
 # 即 deploy.env 的 BOT_WS）。它在第 5 步先起、第 6 步才等 OneBot 就绪，中间连不上只会在
-# 日志里打 "等待重连 OneBot" 并按 1s→30s 退避重试（config/app.yaml 的 napcat.reconnect），
-# SnowLuma 起来后自动连上 —— 所以不需要把它挪到第 6 步之后（挪过去反而要多等一轮就绪）。
+# 日志里按 1s→30s 退避重试（config 的 onebot 重连策略），SnowLuma 起来后自动连上
+# —— 所以不需要把它挪到第 6 步之后（挪过去反而要多等一轮就绪）。
 # 第 2 步刚杀过控制台（AGENT_RESTARTED=1）时不再看端口：旧进程可能还没退干净、3081 仍是
 # 200，按端口判就会跳过启动 → 控制台永久停。杀过就无条件重启。
 if [ "${AGENT_RESTARTED:-0}" = "1" ] || [ "$(code "http://127.0.0.1:${AGENT_PORT:-3081}/")" != "200" ]; then
   AGENT_HOME="${AGENT_DIR:-/opt/qqagent}"
-  if [ -f "$AGENT_HOME/dist/src/index.js" ]; then
-    # 顺手写 pidfile（run/ 下，和 Xvfb/x11vnc 一个惯例）：stop-all.sh 靠它精确点名，
-    # 比按命令行匹配可靠。exec 不能省 —— `cd && nohup node &` 这种 and-list 后台化时
-    # bash 可能再 fork 一层，$! 就成了马甲 shell 的 pid，第 2 步重启时按 cmdline 校验会被
-    # 判成「pidfile 已失效」而跳过 kill，旧控制台就留着占 3081 了。
-    ( cd "$AGENT_HOME" && exec nohup node dist/src/index.js >/tmp/qqagent.log 2>&1 </dev/null &
+  if [ -f "$AGENT_HOME/src/server.js" ]; then
+    # 顺手写 pidfile（run/ 下，和 Xvfb/x11vnc 一个惯例）：stop-all.sh 靠它精确点名。
+    # exec 不能省 —— `cd && nohup node &` 这种 and-list 后台化时 bash 可能再 fork 一层，
+    # $! 就成了马甲 shell 的 pid、瞬间就退，pidfile 直接失效。
+    ( cd "$AGENT_HOME" && exec nohup node "$AGENT_HOME/src/server.js" >/tmp/qqagent.log 2>&1 </dev/null &
       echo $! >"$RUN/qqagent.pid" )
-    say "控制台（node dist/src/index.js，:${AGENT_PORT:-3081}）"
-  elif [ -f "$AGENT_HOME/src/index.ts" ] && [ -x "$AGENT_HOME/node_modules/.bin/tsx" ]; then
-    ( cd "$AGENT_HOME" && exec nohup ./node_modules/.bin/tsx src/index.ts >/tmp/qqagent.log 2>&1 </dev/null &
-      echo $! >"$RUN/qqagent.pid" )
-    say "控制台（tsx src/index.ts，:${AGENT_PORT:-3081}）"
+    say "控制台（node src/server.js，:${AGENT_PORT:-3081}）"
   else
-    say "跳过控制台：$AGENT_HOME 里既没有 dist/src/index.js 也没有可执行的 tsx（Agent 没装好？看部署第 5 步日志）"
+    say "跳过控制台：$AGENT_HOME/src/server.js 不存在（Agent 没装好？看部署第 5 步日志）"
   fi
 fi
 
@@ -285,7 +313,8 @@ echo "  扫码     noVNC: http://127.0.0.1:${NOVNC_PORT:-6081}/vnc.html"
 echo "           或手机装任意 VNC 客户端连 127.0.0.1:${VNC_PORT:-5900}"
 echo "  OneBot   ${BOT_HTTP:-3000}/$(code "http://127.0.0.1:${BOT_HTTP:-3000}/")  ${BOT_WS:-3001}/$(code "http://127.0.0.1:${BOT_WS:-3001}/")"
 echo
-# 新版 Agent 没有 /api/status；/api/overview 才是既有模型又有 OneBot 连接状态的那一个
-curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3081}/api/overview" 2>/dev/null | head -c 300; echo
+# 原版 qq-agent 没有 /api/overview；/api/onebot/groups 一举两得：
+# 能返回就证明控制台活着，200/502 又直接说明 OneBot 连没连上
+curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3081}/api/onebot/groups" 2>/dev/null | head -c 300; echo
 echo
 echo "下一步：bash $HERE/status.sh"

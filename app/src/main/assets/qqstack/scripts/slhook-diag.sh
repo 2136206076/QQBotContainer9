@@ -121,44 +121,41 @@ for u in $QQ_UIN; do echo "  ✓ QQ 账号 $u（已登录）"; done
 else
 echo "  ✗ 没找到账号目录 —— QQ 还没真正登录（去「扫码登录」里扫码）"
 fi
-# b) 协议端只是在监听 ≠ 账号就绪：401/403 是鉴权中间件在挡，跟 accountReady 无关
+# b) 协议端只是在监听 ≠ 账号就绪：401/403 是鉴权中间件在挡，跟账号识别无关
 C3000="$(curl -s -m 3 "http://127.0.0.1:${BOT_HTTP:-3000}/" -o /dev/null -w '%{http_code}' 2>/dev/null)"
 echo "  · 协议端 ${BOT_HTTP:-3000} → HTTP ${C3000:-无响应}（401/403 只说明服务在监听，不代表账号已识别）"
-# c) Agent 侧的"真实"连接态：以 /api/overview 为准，字段取不到就打 ?，绝不伪造
-OV="$(curl -s -m 4 "http://127.0.0.1:${AGENT_PORT:-3081}/api/overview" 2>/dev/null)"
-if [ -n "$OV" ]; then
-echo "$OV" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print('  · 控制台 /api/overview 不是 JSON —— 控制台可能没起来（日志：tail -20 /tmp/qqagent.log）')
-    raise SystemExit(0)
-rt = d.get('runtime') or {}
-ob = rt.get('onebot') or {}
-def show(v):
-    if v is None:
-        return '?'
-    if v is True:
-        return 'true'
-    if v is False:
-        return 'false'
-    return str(v)
-nap = rt.get('napcatConnected')
-acc = ob.get('accountReady')
-print('  · napcatConnected       = ' + show(nap))
-print('  · onebot.connected      = ' + show(ob.get('connected')))
-print('  · onebot.accountReady   = ' + show(acc))
-print('  · onebot.apiReady       = ' + show(ob.get('apiReady')))
-# 只看 acc：与 status.sh 同一口径（accountReady 才代表协议端真认到了账号，
-# napcatConnected 只是「WS 有没有连上」，连上但没识别账号时它是 true，混在一起看会漏报）
-if acc is False:
-    print('    → 账号未识别：点「启动」（会重启协议端+控制台，QQ 不用重新扫码）')
-"
+# c) Agent 侧的真实连接态：原版 qq-agent 没有 /api/overview（上一版 TypeScript 分支才有），
+#    用它自带的 /api/onebot/groups 判：200=真取到了群列表（连上）、502=没连上（body 里带原因）。
+#    -o 落盘再用 python 读，避免把 curl 的输出和状态码混在一起解析。
+OB_CODE="$(curl -s -m 5 -o /tmp/.ob-diag.json -w '%{http_code}' "http://127.0.0.1:${AGENT_PORT:-3081}/api/onebot/groups" 2>/dev/null || true)"
+case "$OB_CODE" in
+  200)
+    echo "  ✓ OneBot 已连接（能取到群列表）"
+    ;;
+  502)
+    echo "  ✗ OneBot 未连接"
+    python3 -c "import json;d=json.load(open('/tmp/.ob-diag.json'));print('    原因: ' + str(d.get('error') or '（/api/onebot/groups 没给 error 字段）'))" 2>/dev/null \
+      || echo "    原因: （读不出 /tmp/.ob-diag.json）"
+    echo "    → 协议端没起 / 端口不对 / token 不对，看 /tmp/qqagent.log"
+    ;;
+  *)
+    echo "  ? 控制台没响应（HTTP ${OB_CODE:-000}）—— 控制台没起？看 /tmp/qqagent.log"
+    ;;
+esac
+# d) 核对控制台侧的 OneBot 目标地址：连不上最常见的原因就是它指向了错的端口 / 带了错的 token。
+#    /api/config 走 sanitizeConfig：密钥字段（accessToken）会被**整个删掉**、只留
+#    hasAccessToken 布尔 —— 所以这里读 hasAccessToken（读 accessToken 会永远是"空"）。
+#    绝不打印 token 明文：诊断输出经常被截图发出去。万一变体回了明文，也只打长度。
+#    临时文件用 -diag 后缀：status.sh 也用 /tmp/.agent-conf.json，两边并发（用户点了
+#    「状态」又来点「hook 诊断」）会互相覆盖，谁先写完谁被对方读成半截/别人的内容。
+CONF_CODE="$(curl -s -m 5 -o /tmp/.agent-conf-diag.json -w '%{http_code}' "http://127.0.0.1:${AGENT_PORT:-3081}/api/config" 2>/dev/null || true)"
+if [ "$CONF_CODE" = "200" ]; then
+  python3 -c "import json;d=json.load(open('/tmp/.agent-conf-diag.json'));ob=d.get('onebot') or {};u=ob.get('wsUrl') or '';h=ob.get('httpUrl') or '';t=ob.get('accessToken');ht=ob.get('hasAccessToken');print('  · onebot.wsUrl       = ' + (u or '(空)'));print('  · onebot.httpUrl     = ' + (h or '(空)'));print('  · onebot.accessToken = ' + (('已设置（长度 %d，不显示明文）' % len(t)) if isinstance(t,str) and t else ('已设置（服务端只回 hasAccessToken=true，不返回明文）' if ht is True else '空（未设置）')));print('  → 期望指向 127.0.0.1:3001（WS）/ 127.0.0.1:3000（HTTP）；不一致就改 /opt/qqagent/data/config.json 后点「启动」')" 2>/dev/null \
+    || echo "  · /api/config 不是 JSON —— 控制台可能没起来"
 else
-echo "  · 控制台 /api/overview 取不到 —— 控制台没起？（日志：tail -20 /tmp/qqagent.log）"
+  echo "  · /api/config 取不到（HTTP ${CONF_CODE:-000}）—— 控制台没起？日志：tail -20 /tmp/qqagent.log"
 fi
-# d) 两端日志尾巴：一眼就能看出 SnowLuma 是停在 awaiting readiness 还是真的没扫到账号
+# e) 两端日志尾巴：一眼就能看出 SnowLuma 是停在 awaiting readiness 还是真的没扫到账号
 for L in /tmp/snowluma.log /tmp/qqagent.log; do
 [ -f "$L" ] || continue
 echo "  --- $L (tail -8)"
@@ -172,4 +169,4 @@ echo "  · 有 'resident dispatch <- ... (失败原因)'  → 载荷路径或文
 echo "  · 一行都没有                              → stub 压根没调 dlopen，用 SLHOOK_VERBOSE=1 重启 QQ"
 echo "      在 deploy.env 里加 SLHOOK_VERBOSE=1，再 grep slhook /tmp/qq.log"
 echo "  · 第 2 步说「所有进程都没加载 wrapper.node」 → QQ 没真正登录完，或 wrapper 未加载，先看第 8 步的登录态"
-echo "  · 第 8 步 accountReady=false 但 QQ 账号已登录 → 协议端没重扫，点「启动」即可（会自动重启协议端）"
+echo "  · 第 8 步「OneBot 未连接」但 QQ 账号已登录 → 协议端没扫到账号，点「启动」即可（会自动重启协议端）"

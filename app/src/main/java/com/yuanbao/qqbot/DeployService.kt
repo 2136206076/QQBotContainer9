@@ -144,7 +144,7 @@ class DeployService : Service() {
         LogBus.log("[4/9] 装系统包 / Node / 编译 hook 载入器")
         if (!Installer.bootstrap(this)) { LogBus.log("✗ 卡在这一步，看上面报错"); return }
 
-        LogBus.log("[5/9] 装 QQ Agent（大脑）")
+        LogBus.log("[5/9] 安装内置 QQ Agent（离线，免联网）")
         val agentOk = Installer.installAgent(this)
         if (!agentOk) LogBus.log("⚠ QQ Agent 未就绪（可稍后重试）")
 
@@ -170,8 +170,8 @@ class DeployService : Service() {
         // 让人误以为全好了。这里把每一步的真实结果摊开：就绪的 ✓，没就绪的 ✗ + 该做什么。
         LogBus.log("========== 本次部署结果（清单）==========")
         reportComponent("QQ Agent（大脑）", agentOk,
-            "重跑部署；或手动：cd /opt/qqagent && npm install（必须全量，tsx 是 devDependency）" +
-            " && npm run build，再 node dist/src/index.js（或 ./node_modules/.bin/tsx src/index.ts）试起")
+            "重跑部署第 5 步（内置包解压即可，全程离线）；或手动：tar xzf /opt/qqstack/agent/qqagent.tar.gz" +
+            " -C /opt/qqagent && cd /opt/qqagent && node src/server.js（不需要 npm install，也没有编译步骤）")
         reportComponent("SnowLuma（协议端）", snowOk,
             "重跑部署；或手动下 SnowLuma-v2.1.1-linux-arm64.tar.gz 解到 /opt/snowluma（版本要和 QQ 配对）")
         reportComponent("Linux 版 QQ", qqOk,
