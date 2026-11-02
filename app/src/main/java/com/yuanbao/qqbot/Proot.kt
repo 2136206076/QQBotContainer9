@@ -138,4 +138,57 @@ object Proot {
         val code = try { p.waitFor() } finally { t.join(READER_JOIN_TIMEOUT_MS) }
         return code
     }
+
+    /**
+     * 常驻进程存活引用。
+     *
+     * Java 的 Process 对象即使被 GC，子进程本身也不会被杀（进程是 OS 资源），但
+     * ProcessImpl 在 GC 时会关掉它的输入/输出流 —— 那样日志就读不到了。这里显式
+     * 持住引用，同时顺手清掉已经死掉的，避免只增不减。
+     */
+    private val liveShells = java.util.Collections.synchronizedList(mutableListOf<Process>())
+
+    /**
+     * 启动一段会把服务留在后台的脚本，**不等待它结束**。
+     *
+     * 为什么需要这个方法：proot 是 ptrace supervisor，会一直等到它跟踪的**所有**
+     * 子孙进程都退出才返回。start-all.sh 拉起的 Xvfb / x11vnc / websockify /
+     * SnowLuma / QQ / 控制台全都是设计上就该常驻的进程，所以对这些进程用 [run]
+     * 同步等待 = 永久阻塞。
+     *
+     * 真机上的表现（v1.3.2 实测）：一键部署走到 [10/10]，日志停在
+     * 「下一步：bash /opt/qqstack/scripts/status.sh」，后面的「部署结果清单」
+     * 和「部署结束」再也不会出现，界面一直转圈 —— 其实服务早就起来了。
+     *
+     * 这里改成「起完就走」：进程留着继续跑，输出照旧逐行进 LogBus（所以用户
+     * 仍能看到 [start] 开头的日志继续往下滚）。要停服务走 stop-all.sh，
+     * 那条路径会把所有子进程杀掉，proot 壳自然就退了。
+     */
+    fun launch(ctx: Context, script: String, tag: String = "bg",
+               extraEnv: Map<String, String> = emptyMap()): Process {
+        val p = shell(ctx, script, extraEnv)
+        liveShells.add(p)
+        // 清掉已经退出的壳（正常情况很少，主要是防止反复点「启动」时只增不减）
+        try { liveShells.removeAll { !it.isAlive } } catch (_: Throwable) {}
+
+        // 这种线程要 daemon：常驻进程活着的时候它就得一直读，但它不该阻止进程退出。
+        val t = Thread(Runnable {
+            try {
+                p.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { LogBus.log("[$tag] $it") }
+                }
+            } catch (_: Throwable) {}
+        }, "proot-$tag")
+        t.isDaemon = true
+        t.start()
+        return p
+    }
+
+    /** 杀掉所有还在跑的 proot 壳（stop 时兜底用，防止叠了多个空壳）。 */
+    fun killLiveShells() {
+        try {
+            liveShells.toList().forEach { if (it.isAlive) it.destroy() }
+            liveShells.clear()
+        } catch (_: Throwable) {}
+    }
 }

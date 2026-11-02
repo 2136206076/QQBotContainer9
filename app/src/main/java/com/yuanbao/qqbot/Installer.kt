@@ -1112,7 +1112,39 @@ PY
     // 调用方一律在后台线程（DeployService 的 thread{...}），同步里的文件 IO + proot 不会触发 StrictMode。
     fun start(ctx: Context): Int {
         syncScriptsIfNeeded(ctx)
-        return Proot.run(ctx, "bash /opt/qqstack/scripts/start-all.sh 2>&1", tag = "start")
+        // 以前这里是 Proot.run(...) 同步等 —— 会永久卡住：
+        // proot 是 ptrace supervisor，要等它跟踪的**所有**子孙进程退出才返回，
+        // 而 start-all.sh 拉起的 Xvfb / x11vnc / websockify / SnowLuma / QQ / 控制台
+        // 全都是设计上就该常驻的。真机表现就是一键部署走到 [10/10] 后日志停在
+        // 「下一步：bash status.sh」，界面一直转圈（v1.3.2 实测）。
+        // 改 launch：进程留后台跑，输出照样进日志。
+        Proot.launch(ctx, "exec bash /opt/qqstack/scripts/start-all.sh 2>&1", tag = "start")
+
+        // 再等一小会儿端口 —— 让「部署结果清单」打出来时状态是真实的。
+        // 45 秒封顶：QQ 没登录时 3000/3001 本来就不会开，不能无限等。
+        LogBus.log("· 服务在后台拉起，等端口就绪（最多 45s）…")
+        val ok = waitAnyPort(listOf(Cfg.AGENT_PORT, Cfg.SLWEBUI_PORT), 45_000)
+        LogBus.log(
+            if (ok) "✓ 端口已监听"
+            else "· 45 秒内没等到端口 —— 若 QQ 还没登录属正常（协议端要等账号上线才开 3000/3001）"
+        )
+        return 0
+    }
+
+    /** 任一端口能连上就返回 true；全部超时返回 false。用于给「拉起」一个上限。 */
+    private fun waitAnyPort(ports: List<Int>, timeoutMs: Long): Boolean {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            for (port in ports) {
+                try {
+                    java.net.Socket("127.0.0.1", port).use { return true }
+                } catch (_: Throwable) {
+                    // 没起来，继续轮询
+                }
+            }
+            try { Thread.sleep(1_500) } catch (_: InterruptedException) { return false }
+        }
+        return false
     }
 
     fun status(ctx: Context): Int {
@@ -1122,7 +1154,11 @@ PY
 
     fun stop(ctx: Context): Int {
         syncScriptsIfNeeded(ctx)
-        return Proot.run(ctx, "bash /opt/qqstack/scripts/stop-all.sh 2>&1", tag = "stop")
+        val rc = Proot.run(ctx, "bash /opt/qqstack/scripts/stop-all.sh 2>&1", tag = "stop")
+        // stop-all.sh 把服务都杀了之后，之前 launch 出来的 proot 壳也该自然退出；
+        // 这里再兜一刀，防止反复「启动/停止」叠出多个空壳。
+        Proot.killLiveShells()
+        return rc
     }
 
     fun versions(ctx: Context): Int {

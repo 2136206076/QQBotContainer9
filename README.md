@@ -289,6 +289,7 @@ API Key 会自动迁移：依次找 旧 `data/config.json` 的 `api.{baseUrl,api
 | `[freeze] hosts 已屏蔽` 但 `⚠ 解析结果：<真实 IP>（未生效）` | 条目虽然写进去了，但解析没走 /etc/hosts | 重写 hosts（去 CR、去重复条目）+ 强制 `nsswitch.conf` 为 `hosts: files dns`（`dns ... files` 这种写法会绕过 hosts）；仍不生效时把条目原文 `cat -A` 打进日志，方便定位 |
 | `OneBot 3000/000`、`ECONNREFUSED 127.0.0.1:3000` | QQ 还没登录时协议端不会开 OneBot 端口，这是**正常状态**，但旧日志直接甩一行 JSON，看着像故障 | 启动脚本分开处理：端口 000 时明确写「QQ 还没登录，扫码后回来点启动」，只有真连上时才去查群列表 |
 | 导出日志里 `签名SHA256: 未知` | 读包信息时 flags 传了 0，Android 13+ 拿不到 `signingInfo` | 改成带 `GET_SIGNING_CERTIFICATES`（低版本 `GET_SIGNATURES`）读取 |
+| 一键部署走到 `[10/10]` 后日志停在「下一步：bash status.sh」，界面一直转圈 | `Proot.run()` 在等 `waitFor()`，而 proot 是 ptrace supervisor —— 它要等**所有**被跟踪的子孙进程退出才返回，`start-all.sh` 拉起的 Xvfb/协议端/QQ/控制台全是常驻进程，所以永远等不到 | `Installer.start` 改用 `Proot.launch`（起完就走，输出继续进日志），再轮询端口最多 45s 给个上限；`stop` 时顺带清掉空转的 proot 壳 |
 | 部署中途弹「等待超时，已恢复按钮」 | 旧版联网装 300MB 依赖 + 编译 hook，跑过 20 分钟 | v1.3 起全离线，UI 超时同时放宽到 40 分钟 |
 | QQ 明明登录了，面板却一直「未连接 OneBot」 | SnowLuma 首启会给 OneBot 监听器**随机生成 accessToken**，而面板默认令牌是空的 → WS 握手 401。看起来像协议端没起来，实际端口在监听 | ① 启动时预置 `config/onebot.json`（127.0.0.1 + 空令牌，SnowLuma 允许回环免令牌）；② 每次启动跑 `sync-onebot.sh`，把协议端真实令牌抄进面板配置，变了就重启面板；③ `versions.sh` 增加令牌对账行 |
 | 面板在手机上没法用（两栏各不到 200px，字被挤成竖排） | 上游 UI 是桌面优先：会话/存档/记忆是「288px 列表 + 详情」，设置页是「240px 侧栏 + 表单」，只有 3 条媒体查询 | 内置 `ui/mobile.css` + `ui/mobile.js`（≤760px）：两栏改单栏「列表 ↔ 详情」切换（左下角返回按钮）、设置侧栏改横向胶囊条、顶栏收成一行、表格横向滚动、输入框 16px 防聚焦缩放；桌面版式完全不动 |

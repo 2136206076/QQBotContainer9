@@ -339,21 +339,27 @@ if [ "${AGENT_RESTARTED:-0}" = "1" ] || [ "$(code "http://127.0.0.1:${AGENT_PORT
     # $! 就成了马甲 shell 的 pid、瞬间就退，pidfile 直接失效。
     ( cd "$AGENT_HOME" && exec nohup "$NODE_BIN" "$AGENT_HOME/src/server.js" >/tmp/qqagent.log 2>&1 </dev/null &
       echo $! >"$RUN/qqagent.pid" )
-    say "控制台（$NODE_BIN src/server.js，:${AGENT_PORT:-3081}）"
+    say "控制台（$NODE_BIN $AGENT_HOME/src/server.js，:${AGENT_PORT:-3081}）"
   else
     say "跳过控制台：$AGENT_HOME/src/server.js 不存在（Agent 没装好？看部署第 6 步日志）"
   fi
 fi
 
 # ---------- 6) 等 OneBot 就绪 ----------
-say "等待就绪（最多 ${BOOT_WAIT:-120}s）…"
+# 上限 60s。原来 120s 且中间一行都不打，手机上看就是「日志不动了」——
+# 实测用户会以为程序卡死。现在每 10 秒输出一行进度，随时能看出还活着。
+WAIT_MAX="${BOOT_WAIT:-60}"
+say "等待 OneBot 端口（最多 ${WAIT_MAX}s，QQ 未登录时不会开端口）…"
 i=0
-while [ "$i" -lt "${BOOT_WAIT:-120}" ]; do
+while [ "$i" -lt "$WAIT_MAX" ]; do
   C=$(code "http://127.0.0.1:${BOT_HTTP:-3000}/")
   [ "$C" = "401" ] || [ "$C" = "403" ] && break
   # 打过 /proc/locks 补丁的话，顺手刷新替身文件
   [ -f "${SNOWLUMA_FAKE_LOCKS:-/opt/qqstack/fake-locks}" ] && bash "$HERE/mkfake-locks.sh" >/dev/null 2>&1
   sleep 5; i=$((i+5))
+  if [ $((i % 10)) -eq 0 ]; then
+    echo "  · 已等 ${i}s（OneBot 现在返回 $C）"
+  fi
 done
 
 echo
