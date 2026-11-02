@@ -1,6 +1,8 @@
 package com.yuanbao.qqbot
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -152,17 +154,101 @@ object Installer {
         LogBus.log("✓ 已写入 resolv.conf / hosts（含热更新屏蔽）/ apt 配置（ubuntu-ports）")
     }
 
-    fun installScripts(ctx: Context) {
-        try {
+    /** 容器内脚本目录（只做路径拼接，不 create —— 没部署过时 exists() 为 false 即可）。 */
+    private fun stackScriptsDir(ctx: Context): File = File(Proot.rootfs(ctx), "opt/qqstack/scripts")
+
+    /** 版本戳：内容 = 本 APK 的 lastUpdateTime，代表「容器里的脚本是哪一版 APK 带进来的」。 */
+    private fun scriptsStampFile(ctx: Context): File = File(Proot.rootfs(ctx), "opt/qqstack/.scripts-stamp")
+
+    /**
+     * 本 APK 的安装/更新时间戳，用作脚本版本号。
+     *
+     * API 33 起 `getPackageInfo(String, int)` 被标 deprecated（不是删除），34 上仍能编译，
+     * 但会刷 deprecation 警告；这里按 SDK_INT 分支走 PackageInfoFlags 新重载，
+     * 老系统留 deprecated 分支并单独 @Suppress，两条路都只在后台线程调用（无 StrictMode 风险）。
+     */
+    private fun apkStamp(ctx: Context): String {
+        val pm = ctx.packageManager
+        val info = if (Build.VERSION.SDK_INT >= 33) {
+            pm.getPackageInfo(ctx.packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageInfo(ctx.packageName, 0)
+        }
+        return info.lastUpdateTime.toString()
+    }
+
+    /**
+     * 把 assets/qqstack 复制进 /opt/qqstack 并补执行位。
+     *
+     * @param keepUserConfig 同步（APK 更新后刷脚本）时为 true：保留容器里已有的
+     *   scripts/deploy.env —— VNC_PASS / 端口 / 目录这些用户可能手工改过，
+     *   被 assets 里的默认值覆盖掉会直接把用户的配置清空。
+     *   首次部署（默认 false）行为与改动前完全一致：无条件覆盖。
+     * @return 是否成功（chmod 那一步退出码为 0）。
+     */
+    fun installScripts(ctx: Context, keepUserConfig: Boolean = false): Boolean {
+        return try {
             val r = Proot.rootfs(ctx)
             val dest = File(r, "opt/qqstack")
+            val envFile = File(dest, "scripts/deploy.env")
+            // 同步（而非首次部署）时保留用户改过的 deploy.env：VNC_PASS / 端口都在里面
+            val savedEnv = if (keepUserConfig && envFile.exists()) envFile.readBytes() else null
             assetCopy(ctx, "qqstack", dest)
+            if (savedEnv != null) {
+                envFile.parentFile?.mkdirs()
+                envFile.writeBytes(savedEnv)
+            }
             val rc = Proot.run(ctx, "chmod -R +x /opt/qqstack/scripts /opt/qqstack/patch /opt/qqstack/tools /opt/qqstack/bin 2>/dev/null; " +
                     "mkdir -p /opt/qqstack/run /tmp/.X11-unix; echo ok", tag = "seed")
             LogBus.log(if (rc == 0) "✓ 部署脚本已就位 /opt/qqstack" else "✗ 脚本安装失败($rc)")
+            // 装成功才写戳：失败（比如 proot 忙）时不留痕，下次入口再试一遍，
+            // 否则一次偶发失败会永久标记「已同步」，用户的旧脚本再也刷不上来。
+            if (rc == 0) markScriptsSynced(ctx)
+            rc == 0
         } catch (e: Throwable) {
             CrashHandler.record("installScripts", e)
             LogBus.log("✗ 脚本安装异常：${e.message}")
+            false
+        }
+    }
+
+    /** 写版本戳（失败忽略：戳写不上只是会多重同步一次，不影响功能）。 */
+    private fun markScriptsSynced(ctx: Context) {
+        try {
+            scriptsStampFile(ctx).writeText(apkStamp(ctx))
+        } catch (_: Throwable) {
+        }
+    }
+
+    /**
+     * APK 更新后把容器里的脚本刷成新版。
+     *
+     * 用 packageManager 的 lastUpdateTime 当版本戳：装了新 APK 才同步一次，平时点按钮零开销
+     * （assetCopy + chmod 要起一次 proot，约 1~3 秒，不能每次都做）。
+     * 失败只记日志不阻断 —— 脚本旧一点总比按钮点不动好。
+     *
+     * 未部署过（/opt/qqstack/scripts 不存在）直接返回，交给「一键部署」第 3 步。
+     * 这里只读 exists()，不会在没部署的机器上凭空造出 /opt/qqstack 目录。
+     *
+     * @Synchronized：状态/拉起可能被连点（DeployService 每次 startService 起一个线程），
+     * 两个线程同时 assetCopy 同一个目录会互相踩；串行化后最坏是第二个线程等 1~3 秒。
+     */
+    @Synchronized
+    fun syncScriptsIfNeeded(ctx: Context) {
+        try {
+            if (!stackScriptsDir(ctx).exists()) return   // 还没部署过，交给部署流程
+            val stamp = scriptsStampFile(ctx)
+            val want = apkStamp(ctx)
+            if (stamp.exists() && stamp.readText().trim() == want) return
+            LogBus.log("· APK 已更新，同步容器内脚本…")
+            if (installScripts(ctx, keepUserConfig = true)) {
+                LogBus.log("✓ 脚本已同步到新版")   // installScripts 成功时已写戳
+            } else {
+                LogBus.log("· 脚本同步失败，不会影响后续操作，下次入口会再试")
+            }
+        } catch (e: Throwable) {
+            LogBus.log("· 脚本同步跳过：${e.message}")
         }
     }
 
@@ -513,11 +599,33 @@ object Installer {
         """.trimIndent(), tag = "patch")
     }
 
-    fun start(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/start-all.sh 2>&1", tag = "start")
-    fun status(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/status.sh 2>&1", tag = "status")
-    fun stop(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/stop-all.sh 2>&1", tag = "stop")
-    fun versions(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/versions.sh 2>&1", tag = "ver")
-    fun diag(ctx: Context): Int = Proot.run(ctx, "bash /opt/qqstack/scripts/slhook-diag.sh 2>&1", tag = "diag")
+    // 每个入口先同步一次脚本（装了新 APK 才真正干活，平时只是一个文件比对），
+    // 再跑对应脚本 —— 保证用户装了新 APK 后不重装容器也能用上修好的脚本。
+    // 调用方一律在后台线程（DeployService 的 thread{...}），同步里的文件 IO + proot 不会触发 StrictMode。
+    fun start(ctx: Context): Int {
+        syncScriptsIfNeeded(ctx)
+        return Proot.run(ctx, "bash /opt/qqstack/scripts/start-all.sh 2>&1", tag = "start")
+    }
+
+    fun status(ctx: Context): Int {
+        syncScriptsIfNeeded(ctx)
+        return Proot.run(ctx, "bash /opt/qqstack/scripts/status.sh 2>&1", tag = "status")
+    }
+
+    fun stop(ctx: Context): Int {
+        syncScriptsIfNeeded(ctx)
+        return Proot.run(ctx, "bash /opt/qqstack/scripts/stop-all.sh 2>&1", tag = "stop")
+    }
+
+    fun versions(ctx: Context): Int {
+        syncScriptsIfNeeded(ctx)
+        return Proot.run(ctx, "bash /opt/qqstack/scripts/versions.sh 2>&1", tag = "ver")
+    }
+
+    fun diag(ctx: Context): Int {
+        syncScriptsIfNeeded(ctx)
+        return Proot.run(ctx, "bash /opt/qqstack/scripts/slhook-diag.sh 2>&1", tag = "diag")
+    }
 
     fun vncPassword(ctx: Context, pass: String): Int {
         val safe = pass.replace("'", "'\\''")
