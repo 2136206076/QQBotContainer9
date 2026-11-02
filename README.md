@@ -19,6 +19,10 @@
 
 > 之后就正常了：v1.1 起同签名的包可以随便覆盖安装，数据不会丢。
 
+构建结束会自动校验产物指纹（Gradle task `verifyApkSignature`）：`assembleDebug` / `assembleRelease`
+跑完即用 `apksigner` 读证书 SHA-256 与固定指纹比对，不一致直接让构建失败，避免又打出一个装不上的包。
+签名库如果被误删也会在这里报错。想单独跑一次：`gradle verifyApkSignature`。
+
 ---
 
 ## 1. 它到底替你做了什么

@@ -64,3 +64,91 @@ dependencies {
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
 }
+
+// ===== 构建后自动校验 APK 签名指纹 =====
+// 为什么放在 Gradle 而不是 CI workflow：改 .github/workflows/* 需要 token 带
+// workflow scope，当前分发凭据没有；而签名一旦漂移，用户就装不上新包 —— 只能
+// 卸载重装，rootfs / QQ / 登录态全部清空。放在这里本地打包也会查，比 CI 单点更广。
+// 为什么用 finalizedBy 而不是 dependsOn：CI 只跑 `gradle assembleDebug`，挂成
+// finalizer 才能在不改 workflow 的前提下自动触发；反过来写成 dependsOn 会和
+// assembleDebug 形成依赖环。
+def QFISH_CERT_SHA256 = "57927f540f57af7b600c94cdedb05321d37c8bce759374b00f171c2b517daeb8"
+def qfishApkRoot = new File(project.layout.buildDirectory.get().asFile, "outputs/apk")
+def qfishKeystore = file("keystore/qfish-debug.jks")
+// 本地可能没有配 SDK（配置阶段就会抛），拿不到就退化成"只查 keystore 在不在"
+def qfishSdkPath = null
+try { qfishSdkPath = android.sdkDirectory?.absolutePath } catch (Throwable ignored) { }
+
+tasks.register("verifyApkSignature") {
+    group = "verification"
+    description = "校验 APK 签名证书 SHA-256 是否与固定签名库一致（防签名漂移导致无法覆盖安装）"
+
+    doLast {
+        if (!qfishKeystore.isFile()) {
+            throw new GradleException("""
+✗ 固定签名库不见了：${qfishKeystore}
+  缺了它 AGP 会退回 ~/.android/debug.keystore，CI 每次现生成一把新证书，
+  打出来的包签名各不相同，用户就没法覆盖安装。
+  恢复：git checkout -- app/keystore/qfish-debug.jks
+""".toString())
+        }
+
+        // 只查真正打出来的 APK；assemble 失败时这里为空，跳过（别掩盖原始错误）
+        def apks = []
+        if (qfishApkRoot.isDirectory()) {
+            qfishApkRoot.eachDir { d -> d.eachFileMatch(~/.*\.apk/) { apks << it } }
+        }
+        if (apks.isEmpty()) {
+            logger.warn("⚠ outputs/apk 下没有 APK，跳过签名校验")
+            return
+        }
+
+        // apksigner 随 build-tools 分发，取版本号最大的一个
+        def signer = null
+        if (qfishSdkPath != null) {
+            def btRoot = new File(qfishSdkPath, "build-tools")
+            if (btRoot.isDirectory()) {
+                def dirs = (btRoot.listFiles() ?: new File[0]).findAll { it.isDirectory() }
+                dirs.sort { a, b -> b.name <=> a.name }
+                signer = dirs.collect { new File(it, "apksigner") }.find { it.isFile() }
+            }
+        }
+        if (signer == null) {
+            logger.warn("⚠ 找不到 apksigner（SDK=${qfishSdkPath}），跳过签名校验。期望指纹 ${QFISH_CERT_SHA256}")
+            return
+        }
+
+        apks.each { apk ->
+            // 用 ProcessBuilder 而不是 project.exec：task action 里不碰 project，
+            // 以后开 configuration cache 也不会炸
+            def pb = new ProcessBuilder(signer.absolutePath, "verify", "--print-certs", apk.absolutePath)
+            pb.redirectErrorStream(true)
+            def proc = pb.start()
+            def text = proc.inputStream.getText("UTF-8")
+            proc.waitFor()
+
+            def m = text =~ /SHA-256 digest:\s*([0-9a-fA-F:]+)/
+            if (!m.find()) {
+                // 不同 apksigner 版本措辞会变，解析不到只警告不失败，避免误伤构建
+                logger.warn("⚠ ${apk.name}: 未能解析签名指纹，跳过校验")
+                logger.warn(text.readLines().take(10).join("\n"))
+                return
+            }
+            def got = m.group(1).replace(":", "").toLowerCase()
+            if (got != QFISH_CERT_SHA256) {
+                throw new GradleException("""
+✗ ${apk.name} 签名指纹不一致 —— 这个包装到手机上覆盖不了旧版
+  期望 : ${QFISH_CERT_SHA256}
+  实际 : ${got}
+  排查 : app/build.gradle 的 signingConfigs.qfish 是否被改过 / keystore 是否被替换
+""".toString())
+            }
+            logger.lifecycle("✓ ${apk.name} 签名指纹一致（${got.take(16)}…），可覆盖安装")
+        }
+    }
+}
+
+// 任何一次 assembleDebug / assembleRelease 结束都会跟一次校验
+tasks.matching { it.name == "assembleDebug" || it.name == "assembleRelease" }.configureEach {
+    finalizedBy "verifyApkSignature"
+}
