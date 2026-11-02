@@ -298,7 +298,10 @@ object Installer {
         // 这里补一次：assetCopy 幂等，包只有 2.7MB，代价远小于「包缺失 → 部署失败」。
         try {
             val agentAssets = File(Proot.rootfs(ctx), "opt/qqstack/agent")
-            if (!File(agentAssets, "qqagent.tar.gz").exists()) {
+            // 注意扩展名是 .pkg 不是 .tar.gz：AGP/aapt 会把 assets 下**以 .gz 结尾**的文件
+            // 自动解压并把 .gz 丢掉（实测 APK 里变成了 8.4MB 的 qqagent.tar），容器里拿到
+            // 未压缩 tar 后 tar -xzf 必报 "not in gzip format"。换成 .pkg 就原样保留字节。
+            if (!File(agentAssets, "qqagent.pkg").exists()) {
                 assetCopy(ctx, "qqstack/agent", agentAssets)
             }
         } catch (e: Throwable) { CrashHandler.record("installAgent.seed", e) }
@@ -314,7 +317,12 @@ object Installer {
             # 这两个路径**写死**、不跟 deploy.env 走：Kotlin 侧 installScripts() 固定把
             # assets/qqstack 复制到 /opt/qqstack，两边不一致就会「找不到包」。
             AGENT_DIR=/opt/qqagent
-            PKG=/opt/qqstack/agent/qqagent.tar.gz
+            # 三个候选名都认：.pkg 是现在的（防止 aapt 自动解压）；.tar.gz 是老 APK 复制
+            # 过来的；.tar 是 aapt 把 .gz 啃掉之后的产物。换版本装到一半时都可能撞见。
+            PKG=""
+            for c in qqagent.pkg qqagent.tar.gz qqagent.tar; do
+              [ -f "/opt/qqstack/agent/${'$'}c" ] && { PKG="/opt/qqstack/agent/${'$'}c"; break; }
+            done
 
             # 迁移用的三个临时文件（旧 data/config.json / .env / config/app.yaml 的副本）。
             # 进门先删一遍：上一轮万一没删干净，留着它会把上一轮的旧 API Key 无提示地套到
@@ -363,8 +371,9 @@ PY
               exit 0
             fi
 
-            if [ ! -f "${'$'}PKG" ]; then
-              echo "✗ 内置包缺失：${'$'}PKG（请重跑「一键部署」第 3 步）"
+            if [ -z "${'$'}PKG" ]; then
+              echo "✗ 内置包缺失：/opt/qqstack/agent/ 下找不到 qqagent.pkg / qqagent.tar.gz / qqagent.tar"
+              echo "  → 重跑「一键部署」第 3 步（会把 assets/qqstack 重新复制进容器）"
               exit 1
             fi
 
@@ -397,7 +406,13 @@ PY
             # 解压失败（包被截断 / 磁盘满 / 写入被打断）时**必须**先把半装目录清掉再退出：
             # 截断的包照样能解出 src/server.js + node_modules/ws + package.json 三件套，
             # 留着它下次复跑就直接「skip: 已是内置版」，用户永远装不起来。
-            tar -xzf "${'$'}PKG" -C "${'$'}AGENT_DIR" || {
+            # 不写死 -z：文件可能是 gzip，也可能是 aapt 剥掉 .gz 之后的裸 tar，看文件头决定。
+            if [ "${'$'}(head -c 2 "${'$'}PKG" | od -An -tx1 | tr -d ' \n')" = "1f8b" ]; then
+              TAROPT=-xzf
+            else
+              TAROPT=-xf
+            fi
+            tar ${'$'}TAROPT "${'$'}PKG" -C "${'$'}AGENT_DIR" || {
               echo "✗ 解压失败（包损坏或磁盘满），已清理半装目录，重跑即可"
               rm -rf "${'$'}AGENT_DIR" 2>/dev/null || true
               exit 1

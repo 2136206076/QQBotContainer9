@@ -155,7 +155,7 @@ tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 /opt/snowluma    SnowLuma（5099 / 3000 / 3001）
 /opt/qqagent     QQ Agent 0.4.0（原版纯 JS，入口 src/server.js；面板 3081，连 OneBot ws://127.0.0.1:3001）
 /opt/qqstack/    libslhook.so、hook 载荷、scripts/、patch/、vncpasswd、run/*.pid
-/opt/qqstack/agent/qqagent.tar.gz   内置的 QQ Agent 离线包（第 5 步从这里解压）
+/opt/qqstack/agent/qqagent.pkg   内置的 QQ Agent 离线包（第 5 步从这里解压；名字不是 .tar.gz 是故意的，见第 8 节）
 ```
 
 ---
@@ -181,11 +181,16 @@ tools/fetch-proot.py  从 Termux 仓库拆 proot deb
 
 ## 8. QQ Agent（大脑 / 控制台）
 
-第 5 步从 App 内置的离线包 `assets/qqstack/agent/qqagent.tar.gz`（**2.7MB / 572 个文件**）
+第 5 步从 App 内置的离线包 `assets/qqstack/agent/qqagent.pkg`（**2.7MB / 572 个文件**，其实是 gzip 过的 tar）
 直接解压到 `/opt/qqagent`：**不 clone、不 `npm install`、不编译**——三个纯 JS 依赖
 （`js-yaml` / `undici` / `ws`）已经打好在这个包的 `node_modules` 里，解压完
 `node src/server.js` 就能起。这一步因此从「看网速」变成「看磁盘」：可重复、可离线，
 包坏了重跑一次第 5 步就行。
+
+> 为什么叫 `.pkg` 而不是 `.tar.gz`：AGP/aapt 打包时会把 assets 里**以 `.gz` 结尾**的文件
+> 自动解压并丢掉 `.gz` 后缀（实测 APK 里变成了 8.4MB 的 `qqagent.tar`），容器里拿到的是
+> 未压缩 tar，`tar -xzf` 直接报 `not in gzip format`。换成 `.pkg` 就能原样保留字节；
+> 安装脚本仍会按文件头（`1f 8b`）判断要不要 `-z`，所以老的 `.tar.gz` / 裸 `.tar` 也认得。
 
 它是**标准 OneBot v11 客户端**，默认连 `ws://127.0.0.1:3001` + `http://127.0.0.1:3000` ——
 正好等于 `scripts/deploy.env` 里的 `BOT_WS` / `BOT_HTTP`，也就是本项目自己管的
