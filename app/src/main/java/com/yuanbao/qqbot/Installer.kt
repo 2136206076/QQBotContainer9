@@ -36,6 +36,86 @@ object Installer {
         return magic.contentEquals("!<arch>\n".toByteArray())
     }
 
+    // ===== 内置离线资源（assets/qqstack/offline）=====
+    // 打包方式说明：.gz 结尾的文件会被 AGP/aapt 自动解压并去掉后缀，所以一律叫 .pkg。
+    // 里面的字节是原样的（rootfs / SnowLuma 是 gzip，pkgs / novnc 是裸 tar），
+    // 解压时按文件头 1f 8b 判断要不要加 -z。
+    private const val OFF_ROOTFS = "qqstack/offline/rootfs.pkg"
+    // 依赖包拆成两片：GitHub 单文件上限 100MB，一整个 195MB 的 tar 推不上去，
+    // CI 构建就会在 clone 阶段直接失败。两片各自 97MB，解到同一个目录即可。
+    private val OFF_PKG_PARTS = listOf(
+        "qqstack/offline/pkgs-a.pkg",
+        "qqstack/offline/pkgs-b.pkg"
+    )
+    private const val OFF_SNOWLUMA = "qqstack/offline/snowluma.pkg"
+    private const val OFF_NOVNC = "qqstack/offline/novnc.pkg"
+
+    private fun hasAsset(ctx: Context, path: String): Boolean = try {
+        ctx.assets.open(path).close()
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * 流式把一个大 asset 复制到设备私有目录。
+     *
+     * 不能用 assetCopy()：那个是按目录递归的，而 offline 下是单个 195MB 的文件，
+     * 走 list() 会拿到空数组、直接落到 open() 分支，行为一样但没法报进度 ——
+     * 而这一步动辄几十秒，用户看不到进度会以为卡死。
+     */
+    private fun copyAsset(ctx: Context, assetPath: String, dest: File, label: String): Boolean {
+        return try {
+            dest.parentFile?.mkdirs()
+            val total = try {
+                ctx.assets.openFd(assetPath).use { it.length }
+            } catch (_: Throwable) {
+                -1L
+            }
+            ctx.assets.open(assetPath).use { input ->
+                FileOutputStream(dest).use { out ->
+                    val buf = ByteArray(1 shl 20)
+                    var sum = 0L
+                    var lastPct = -1L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        sum += n
+                        if (total > 0) {
+                            val pct = sum * 100 / total
+                            if (pct != lastPct && pct % 20 == 0L) {
+                                lastPct = pct
+                                LogBus.log("· $label $pct%")
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        } catch (e: Throwable) {
+            CrashHandler.record("copyAsset($assetPath)", e)
+            LogBus.log("✗ 复制 $label 失败：${e.message}")
+            false
+        }
+    }
+
+    /** 容器内 tar 的通用解包：看文件头决定 -z，解完删包（省空间）。 */
+    private fun untarInGuest(ctx: Context, tag: String, tarPath: String, dest: String): Int {
+        return Proot.run(ctx, """
+            set -e
+            [ -f '$tarPath' ] || { echo "找不到 $tarPath"; exit 1; }
+            mkdir -p '$dest'
+            if [ "${'$'}(head -c 2 '$tarPath' | od -An -tx1 | tr -d ' \n')" = "1f8b" ]; then
+              tar -xzf '$tarPath' -C '$dest'
+            else
+              tar -xf '$tarPath' -C '$dest'
+            fi
+            rm -f '$tarPath'
+            echo ok
+        """.trimIndent(), tag = tag)
+    }
+
     fun download(url: String, out: File, onProgress: (Long, Long) -> Unit) {
         out.parentFile?.mkdirs()
         var current: String = url
@@ -96,21 +176,33 @@ object Installer {
             return true
         }
         val gz = File(ctx.filesDir, "rootfs.tar.gz")
-        if (!gz.exists() || gz.length() < 1_000_000) {
-            LogBus.log("↓ 下载 Ubuntu Base（约 28MB）…")
-            try {
-                download(url, gz) { cur, total ->
-                    if (total > 0) {
-                        val pct = cur * 100 / total
-                        if (pct % 10 == 0L) LogBus.log("↓ 下载 ${pct}%")
-                    }
+        if (!gz.exists() || gz.length() < 1_000_000 || !isGzip(gz)) {
+            if (gz.exists()) gz.delete()
+            // 优先用内置包：APK 里已经带了同一份 ubuntu-base，没必要再走一遍网络。
+            // 只有内置包缺失（比如用户手动删了 assets）才回落到下载。
+            if (hasAsset(ctx, OFF_ROOTFS)) {
+                LogBus.log("⇩ 解包内置 Ubuntu 根文件系统（29MB，不联网）…")
+                if (copyAsset(ctx, OFF_ROOTFS, gz, "写入 rootfs")) {
+                    LogBus.log("✓ 内置 rootfs 已就位（${gz.length() / 1024 / 1024}MB）")
                 }
-            } catch (e: Throwable) {
+            }
+            if (!gz.exists() || gz.length() < 1_000_000 || !isGzip(gz)) {
                 if (gz.exists()) gz.delete()
-                throw e
+                LogBus.log("↓ 内置包不可用，改为下载 Ubuntu Base（约 28MB）…")
+                try {
+                    download(url, gz) { cur, total ->
+                        if (total > 0) {
+                            val pct = cur * 100 / total
+                            if (pct % 10 == 0L) LogBus.log("↓ 下载 ${pct}%")
+                        }
+                    }
+                } catch (e: Throwable) {
+                    if (gz.exists()) gz.delete()
+                    throw e
+                }
             }
             if (gz.length() < 1_000_000 || !isGzip(gz)) {
-                LogBus.log("✗ 下到的文件不像 gzip（${gz.length()} 字节），丢掉重试")
+                LogBus.log("✗ 拿到的 rootfs 不像 gzip（${gz.length()} 字节），丢掉重试")
                 gz.delete()
                 return false
             }
@@ -194,7 +286,13 @@ object Installer {
             val envFile = File(dest, "scripts/deploy.env")
             // 同步（而非首次部署）时保留用户改过的 deploy.env：VNC_PASS / 端口都在里面
             val savedEnv = if (keepUserConfig && envFile.exists()) envFile.readBytes() else null
-            assetCopy(ctx, "qqstack", dest)
+            // 注意：不能直接 assetCopy("qqstack", dest) —— 那样会把 offline/ 下 277MB 的
+            // 大包也一起复制进来（而且 installOffline 还会再处理一遍）。offline 单独走。
+            val tops = ctx.assets.list("qqstack") ?: emptyArray()
+            for (name in tops) {
+                if (name == "offline") continue
+                assetCopy(ctx, "qqstack/$name", File(dest, name))
+            }
             if (savedEnv != null) {
                 envFile.parentFile?.mkdirs()
                 envFile.writeBytes(savedEnv)
@@ -219,6 +317,98 @@ object Installer {
             scriptsStampFile(ctx).writeText(apkStamp(ctx))
         } catch (_: Throwable) {
         }
+    }
+
+    /**
+     * 把 APK 内置的离线资源铺进容器：SnowLuma、noVNC、290 个 arm64 依赖包。
+     *
+     * 为什么放在 bootstrap 之前：bootstrap 会用 SnowLuma 自带的 node 当运行时
+     * （v24.22.1，已确认编进了 FTS5 和 DatabaseSync.isTransaction），并且离线装包，
+     * 两件事都得先看到文件。
+     *
+     * 幂等：三项各自存在就跳过，重跑部署不会重复解压 400MB。
+     *
+     * @return SnowLuma 与依赖包是否都就位（noVNC 失败只告警，不影响主链路）
+     */
+    @Synchronized
+    fun installOffline(ctx: Context): Boolean {
+        val r = Proot.rootfs(ctx)
+        var slOk = File(r, "opt/snowluma/index.mjs").exists()
+
+        if (!slOk && hasAsset(ctx, OFF_SNOWLUMA)) {
+            LogBus.log("⇩ 解包内置 SnowLuma（50MB → 140MB，不联网）…")
+            val f = File(r, "tmp/snowluma.tar")
+            f.parentFile?.mkdirs()
+            if (copyAsset(ctx, OFF_SNOWLUMA, f, "写入 SnowLuma")) {
+                if (untarInGuest(ctx, "sl", "/tmp/snowluma.tar", "/opt/snowluma") == 0 &&
+                    File(r, "opt/snowluma/index.mjs").exists()) {
+                    slOk = true
+                    LogBus.log("✓ SnowLuma 已就位")
+                } else {
+                    LogBus.log("✗ SnowLuma 解包失败（稍后第 6 步会尝试联网补装）")
+                    f.delete()
+                }
+            } else {
+                f.delete()
+            }
+        } else if (slOk) {
+            LogBus.log("· SnowLuma 已存在，跳过解包")
+        }
+
+        // noVNC：apt 的 novnc 包会硬拉系统 nodejs 18（和 SnowLuma 的 node 抢 /usr/bin/node，
+        // 还会顺带装 40MB 的 oslo/numpy 一堆 python 依赖），所以这里只放静态文件，
+        // websockify 单独从 python3-websockify 装。
+        if (!File(r, "usr/share/novnc/vnc.html").exists() && hasAsset(ctx, OFF_NOVNC)) {
+            LogBus.log("⇩ 解包内置 noVNC（1MB）…")
+            val f = File(r, "tmp/novnc.tar")
+            f.parentFile?.mkdirs()
+            if (copyAsset(ctx, OFF_NOVNC, f, "写入 noVNC")) {
+                if (untarInGuest(ctx, "novnc", "/tmp/novnc.tar", "/usr/share/novnc") != 0) {
+                    LogBus.log("⚠ noVNC 解包失败（扫码页面会打不开，其余功能不受影响）")
+                    f.delete()
+                }
+            } else {
+                f.delete()
+            }
+        }
+
+        // 依赖包：两片各 98MB 的裸 tar，合计 290 个 .deb。装完由 bootstrap 删掉省空间。
+        val pkgDir = File(r, "opt/qqstack/pkgs")
+        val haveDebs = pkgDir.listFiles()?.count { it.name.endsWith(".deb") } ?: 0
+        if (haveDebs < 200) {
+            pkgDir.mkdirs()
+            var partOk = 0
+            for ((idx, asset) in OFF_PKG_PARTS.withIndex()) {
+                if (!hasAsset(ctx, asset)) {
+                    LogBus.log("⚠ 内置分片缺失：$asset")
+                    continue
+                }
+                LogBus.log("⇩ 解包内置依赖包 ${idx + 1}/${OFF_PKG_PARTS.size}（98MB，不联网）…")
+                val f = File(r, "opt/qqstack/pkgs-part$idx.tar")
+                f.parentFile?.mkdirs()
+                if (copyAsset(ctx, asset, f, "写入分片 ${idx + 1}")) {
+                    // 注意：不能解完就删目录 —— 两片要解到同一个 $pkgDir 里
+                    if (untarInGuest(ctx, "pkgs$idx", "/opt/qqstack/pkgs-part$idx.tar", "/opt/qqstack/pkgs") == 0) {
+                        partOk++
+                    } else {
+                        f.delete()
+                    }
+                } else {
+                    f.delete()
+                }
+            }
+            val n = pkgDir.listFiles()?.count { it.name.endsWith(".deb") } ?: 0
+            if (partOk == OFF_PKG_PARTS.size && n >= 200) {
+                LogBus.log("✓ 依赖包已就位（$n 个）")
+            } else {
+                LogBus.log("✗ 依赖包不完整（$n 个，成功分片 $partOk/${OFF_PKG_PARTS.size}），第 5 步会退回联网安装")
+            }
+        } else {
+            LogBus.log("· 依赖包已存在（$haveDebs 个），跳过解包")
+        }
+
+        val pkgOk = (pkgDir.listFiles()?.count { it.name.endsWith(".deb") } ?: 0) >= 200
+        return slOk && pkgOk
     }
 
     /**
@@ -257,9 +447,9 @@ object Installer {
         val out = p.inputStream.bufferedReader().readText().trim()
         p.waitFor()
         if (out == "yes") { LogBus.log("· 系统包已装过，跳过（要重装：删 ${Cfg.BOOTSTRAP_MARK}）"); return true }
-        LogBus.log("▶ apt 安装依赖 + Node 22 + 编译 hook（这一步最慢，5~15 分钟）")
+        LogBus.log("▶ 安装系统依赖 + 运行时 + hook（离线包；这一步最慢，5~15 分钟）")
         val rc = Proot.run(ctx, "bash /opt/qqstack/scripts/proot-bootstrap.sh 2>&1", tag = "boot")
-        LogBus.log(if (rc == 0) "✓ 基础环境完成" else "✗ 基础环境失败($rc)，看上面 apt 报错")
+        LogBus.log(if (rc == 0) "✓ 基础环境完成" else "✗ 基础环境失败($rc)，看上面的报错")
         return rc == 0
     }
 
@@ -317,6 +507,10 @@ object Installer {
             # 这两个路径**写死**、不跟 deploy.env 走：Kotlin 侧 installScripts() 固定把
             # assets/qqstack 复制到 /opt/qqstack，两边不一致就会「找不到包」。
             AGENT_DIR=/opt/qqagent
+            # 面板 UI 的版本戳：只要 ui/ 里有改动就换一个值。
+            # 老用户 /opt/qqagent 已是「内置版」，下面的 skip 分支会直接跳过解压 ——
+            # 不单独记这个戳，新 UI（手机窄屏适配）就永远铺不进去。
+            UI_VER=m1
             # 三个候选名都认：.pkg 是现在的（防止 aapt 自动解压）；.tar.gz 是老 APK 复制
             # 过来的；.tar 是 aapt 把 .gz 啃掉之后的产物。换版本装到一半时都可能撞见。
             PKG=""
@@ -366,6 +560,23 @@ except Exception:
     sys.exit(0)
 print('· 老配置里没有 skills 段，已补上「主动行为默认关闭」（重启 QQ Agent 后生效；要在面板里按需开启）')
 PY
+              fi
+              # ---- 面板 UI 增量更新（只重铺 ui/，绝不动 data/）----
+              # v1.3.2：ui/ 里加了手机窄屏适配（mobile.css / mobile.js + index.html 两行引用）。
+              # 只解压 ui/ 的代价约 1MB，比整包重装安全得多（data/ 里是用户的会话和 Key）。
+              if [ "$(cat "${'$'}AGENT_DIR/.ui-version" 2>/dev/null)" != "${'$'}UI_VER" ]; then
+                TMPD="${'$'}(mktemp -d 2>/dev/null || echo /tmp/qqagent-ui.${'$'}${'$'})"
+                mkdir -p "${'$'}TMPD"
+                if [ "${'$'}(head -c 2 "${'$'}PKG" | od -An -tx1 | tr -d ' \n')" = "1f8b" ]; then T=-xzf; else T=-xf; fi
+                if tar ${'$'}T "${'$'}PKG" -C "${'$'}TMPD" 2>/dev/null && [ -f "${'$'}TMPD/ui/index.html" ]; then
+                  rm -rf "${'$'}AGENT_DIR/ui"
+                  cp -a "${'$'}TMPD/ui" "${'$'}AGENT_DIR/ui" \
+                    && echo "${'$'}UI_VER" >"${'$'}AGENT_DIR/.ui-version" \
+                    && echo "· 面板 UI 已更新到 ${'$'}UI_VER（手机窄屏适配）"
+                else
+                  echo "· 面板 UI 更新解压失败，沿用旧 UI（不影响运行）"
+                fi
+                rm -rf "${'$'}TMPD"
               fi
               echo "agent: ${'$'}(node -p "require('/opt/qqagent/package.json').version" 2>/dev/null || echo '?')"
               exit 0
@@ -422,6 +633,8 @@ PY
               rm -rf "${'$'}AGENT_DIR" 2>/dev/null || true
               exit 1
             }
+            # 记下 UI 版本戳：下次升级时据此判断要不要单独重铺 ui/（见上面的 skip 分支）
+            echo "${'$'}UI_VER" >"${'$'}AGENT_DIR/.ui-version" 2>/dev/null || true
 
             # data/ 是刻意从包里剔出去的（里面有打包者的真实 API Key），这里现场造一个。
             # 只写要覆盖的字段：loadConfig 是 deepMerge(DEFAULT_CONFIG, 文件内容)，
@@ -602,7 +815,14 @@ PY
 
     fun installSnowLuma(ctx: Context): Boolean {
         val ok = Proot.run(ctx, """
-            [ -f /opt/snowluma/index.mjs ] && { echo skip; exit 0; }
+            # 内置版三件套：入口 index.mjs + 自带 node + native 库。
+            # 只查 index.mjs 会把「解压到一半（比如磁盘满）」误判成已装好 ——
+            # 那种状态下 node 或 native/*.so 缺失，SnowLuma 起来就 Crash。
+            if [ -f /opt/snowluma/index.mjs ] && [ -x /opt/snowluma/node ] && [ -d /opt/snowluma/native ]; then
+              echo "skip: 内置 SnowLuma 已就位（$(cat /opt/snowluma/release.json 2>/dev/null | tr -d '\n' | head -c 60)）"
+              exit 0
+            fi
+            echo "内置包不完整，改为联网下载（内置包在 assets/qqstack/offline/snowluma.pkg）"
             cd /tmp
             curl -fL --retry 3 -o sl.tar.gz ${Cfg.SNOWLUMA_URL} || { echo "下载失败"; exit 1; }
             mkdir -p /opt/snowluma /tmp/sl-unpack
@@ -660,6 +880,25 @@ PY
         if (Proot.run(ctx, "[ -f /opt/QQ/resources/app/package.json ] && exit 0 || exit 9",
                 tag = "qqchk") == 0) {
             Proot.run(ctx, "python3 -c \"import json;print('已有 QQ:', json.load(open('/opt/QQ/resources/app/package.json'))['version'])\" 2>/dev/null", tag = "qq")
+            // v1.2 装 QQ 时，postinst 里的 update-desktop-database 不存在 → postinst 失败 →
+            // dpkg 把 linuxqq 留在 half-configured。文件是全的、QQ 也能跑，所以当初没报错；
+            // 但之后每次 dpkg/apt 都会重复刷同一条错误，重装 QQ 也会被这个状态卡住。
+            // 老用户升级上来时 QQ 已存在、走的就是这条早退分支，所以修在这里。
+            Proot.run(ctx, """
+                st=${'$'}(dpkg-query -W -f='${'$'}{Status}' linuxqq 2>/dev/null || true)
+                case "${'$'}st" in
+                  *"install ok installed"*|"") : ;;
+                  *)
+                    echo "· linuxqq 包状态是 [${'$'}st]，补配一次（v1.2 遗留的半配置态）"
+                    for b in update-desktop-database update-mime-database; do
+                      command -v ${'$'}b >/dev/null 2>&1 || {
+                        printf '#!/bin/sh\nexit 0\n' >"/usr/bin/${'$'}b"; chmod +x "/usr/bin/${'$'}b"; }
+                    done
+                    dpkg --configure linuxqq 2>&1 | tail -4 || true
+                    dpkg-query -W -f='${'$'}{Status}' linuxqq 2>/dev/null | sed 's/^/· 补配后：/'
+                    ;;
+                esac
+            """.trimIndent(), tag = "qq")
             return true
         }
         val src = source.trim()
@@ -774,7 +1013,34 @@ PY
             [ -f '$pkg' ] || { echo "文件不存在: $pkg"; exit 1; }
             mkdir -p /opt
             case '$pkg' in
-              *.deb)           dpkg -i '$pkg' 2>&1 | tail -8 || true; apt-get install -y -f 2>&1 | tail -8 ;;
+              *.deb)
+                # linuxqq 的 postinst 会调 update-desktop-database（来自 desktop-file-utils），
+                # 容器里没有这个包 → 命令不存在 → postinst 非 0 退出 → dpkg 把 linuxqq
+                # 停在 half-configured，之后每次 dpkg/apt 都会重复报同一个错。
+                # 这里补个返回 0 的桩（bootstrap 已经建过，这里是幂等兜底）。
+                for b in update-desktop-database update-mime-database gtk-update-icon-cache; do
+                  command -v ${'$'}b >/dev/null 2>&1 || {
+                    printf '#!/bin/sh\nexit 0\n' >"/usr/bin/${'$'}b"; chmod +x "/usr/bin/${'$'}b"; }
+                done
+                dpkg -i '$pkg' 2>&1 | tail -8 || true
+                # QQ 的 9 个依赖（libnotify4/libsecret-1-0/xdg-utils/libxss1/libxtst6…）
+                # 已经在内置包里了，正常情况下 dpkg -i 一次就成。
+                # 只有真缺依赖时才走 apt-get -f —— 离线环境下它会去联网，失败时会刷一屏
+                # 红字，用户容易误以为整个部署挂了。
+                if ! dpkg -s linuxqq >/dev/null 2>&1; then
+                  echo "· QQ 依赖没解全，尝试 apt-get -f 补齐（离线环境会失败，可忽略）"
+                  apt-get install -y -f 2>&1 | tail -8 || true
+                fi
+                # 依赖齐了、文件也解开了，但 postinst 失败过 → 状态仍是 half-configured。
+                # 不补配的话，下次装包时 dpkg 会把这个错误再刷一遍，重装 QQ 也会被卡。
+                QQS=${'$'}(dpkg-query -W -f='${'$'}{Status}' linuxqq 2>/dev/null || true)
+                case "${'$'}QQS" in
+                  *"install ok installed"*) echo "· linuxqq 状态正常" ;;
+                  *) echo "· linuxqq 状态：${'$'}QQS"
+                     dpkg --configure linuxqq 2>&1 | tail -6 || true
+                     dpkg-query -W -f='${'$'}{Status}' linuxqq 2>/dev/null | sed 's/^/· 补配后：/' ;;
+                esac
+                ;;
               *.tar.gz|*.tgz)  tar xzf '$pkg' -C /opt ;;
               *.tar.xz)        tar xJf '$pkg' -C /opt ;;
               *)               echo "不认识的包格式: $pkg"; exit 1 ;;

@@ -554,7 +554,7 @@ class MainActivity : AppCompatActivity() {
             LogBus.log("⚠ 这个 APK 里没打包 proot：构建前请先执行 python3 tools/fetch-proot.py")
         } else {
             LogBus.log("· proot 就绪：${Proot.prootBin(this).absolutePath}")
-            LogBus.log("· 点「一键部署」开始；路径留空会自动下载 QQ 3.2.32 arm64")
+            LogBus.log("· 点「一键部署」开始（内置离线包，全程只有 QQ 需要联网）")
         }
     }
 
@@ -635,25 +635,25 @@ class MainActivity : AppCompatActivity() {
         /** QQ 必须是这个版本，协议端才对得上 */
         private const val QQ_EXPECT = "3.2.32-52194"
 
-        /** DeployService.deploy() 一共 9 步 */
-        private const val TOTAL_STEPS = 9
+        /** DeployService.deploy() 一共 10 步 */
+        private const val TOTAL_STEPS = 10
 
         /**
          * 兜底超时：只在收不到「== 完成：」/「✗ 服务启动失败」时才兜底解锁，
          * 所以取值要略大于部署的正常耗时，避免部署跑到一半被误解锁。
          *
-         * - deploy：[4/9] 那步 apt 装包官方说明最慢 5~15 分钟，加上下载 / 解压 / 其它步骤，
-         *   整体通常在 20 分钟内收尾，这里给 20 分钟留足余量（原来 45 分钟太保守，
-         *   万一真没收到完成信号，界面会长时间不可操作）。
+         * - deploy：全离线方案要在 proot 里 dpkg -i 装 290 个包，官方实测 5~15 分钟；
+         *   加上解压 277MB 内置资源、装 QQ、打补丁，整体 15~25 分钟收尾。
+         *   这里给 40 分钟留足余量 —— 宁可晚解锁，也不要部署跑到一半被误解锁。
          * - 其它动作（start / stop / status / versions / diag）：都是秒级或几十秒，3 分钟足够。
          *
          * 常量显式以 1000L 收尾，全程 Long 运算（1200 * 1000L = 1_200_000L），不会整数溢出。
          */
-        private const val BUSY_TIMEOUT_DEPLOY_MS = 20 * 60 * 1000L
+        private const val BUSY_TIMEOUT_DEPLOY_MS = 40 * 60 * 1000L
         private const val BUSY_TIMEOUT_OTHER_MS = 3 * 60 * 1000L
 
-        /** DeployService 打的 [4/9] 这种步骤行 */
-        private val STEP_RE = Regex("\\[(\\d{1,2})/9\\]")
+        /** DeployService 打的 [4/10] 这种步骤行 */
+        private val STEP_RE = Regex("\\[(\\d{1,2})/10\\]")
 
         /** DeployService.run() 的 finally 里打的收尾行 */
         private const val DONE_PREFIX = "== 完成："

@@ -126,7 +126,23 @@ class DeployService : Service() {
         LogBus.log("========== 一键部署开始 ==========")
         LogBus.log("· proot: ${Proot.prootBin(this).absolutePath}")
 
-        LogBus.log("[1/9] 准备 Ubuntu 根文件系统")
+        // 全离线方案要在本机铺开约 1.1GB：rootfs 解压 100MB、290 个包装完涨到 ~800MB、
+        // SnowLuma 140MB、中间还有 195MB 的 deb 缓存。空间不够会失败在半路，
+        // 而且报错是 dpkg 的 "No space left on device"，很难联想到是存储问题 —— 先挡一刀。
+        try {
+            val stat = android.os.StatFs(filesDir.absolutePath)
+            val freeMB = stat.availableBytes / 1024 / 1024
+            LogBus.log("· 可用空间：${freeMB}MB（本方案需要约 2000MB）")
+            if (freeMB < 2000) {
+                LogBus.log("✗ 存储空间不足：还差约 ${2000 - freeMB}MB，清理后再部署")
+                LogBus.log("  （容器数据在 App 私有目录，卸载 App 会一并清空）")
+                return
+            }
+        } catch (e: Throwable) {
+            LogBus.log("· 空间检查跳过：${e.message}")
+        }
+
+        LogBus.log("[1/10] 准备 Ubuntu 根文件系统")
         var gotRootfs = false
         for (url in Cfg.ROOTFS_URLS) {
             LogBus.log("↓ 尝试 $url")
@@ -135,33 +151,37 @@ class DeployService : Service() {
         }
         if (!gotRootfs) { LogBus.log("✗ rootfs 下载/解压都失败了，检查网络后重试"); return }
 
-        LogBus.log("[2/9] 写入网络/热更新屏蔽配置")
+        LogBus.log("[2/10] 写入网络/热更新屏蔽配置")
         Installer.seed(this)
 
-        LogBus.log("[3/9] 放入部署脚本")
+        LogBus.log("[3/10] 放入部署脚本")
         Installer.installScripts(this)
 
-        LogBus.log("[4/9] 装系统包 / Node / 编译 hook 载入器")
+        LogBus.log("[4/10] 解开内置离线资源（SnowLuma / noVNC / 290 个依赖包）")
+        val offlineOk = Installer.installOffline(this)
+        if (!offlineOk) LogBus.log("⚠ 离线资源不完整，后面会退回联网安装（比较慢）")
+
+        LogBus.log("[5/10] 装系统包 / 运行时 / hook 载入器")
         if (!Installer.bootstrap(this)) { LogBus.log("✗ 卡在这一步，看上面报错"); return }
 
-        LogBus.log("[5/9] 安装内置 QQ Agent（离线，免联网）")
+        LogBus.log("[6/10] 安装内置 QQ Agent（离线，免联网）")
         val agentOk = Installer.installAgent(this)
         if (!agentOk) LogBus.log("⚠ QQ Agent 未就绪（可稍后重试）")
 
-        LogBus.log("[6/9] 装 SnowLuma（协议端）")
+        LogBus.log("[7/10] 核对 SnowLuma（协议端）")
         val snowOk = Installer.installSnowLuma(this)
         if (!snowOk) LogBus.log("⚠ SnowLuma 未就绪（可稍后重试）")
 
-        LogBus.log("[7/9] 装 Linux 版 QQ（必须是 3.2.32-52194）")
+        LogBus.log("[8/10] 装 Linux 版 QQ（必须是 3.2.32-52194）")
         val qqOk = Installer.installQQ(this, qqSrc)
         if (!qqOk) {
             LogBus.log("⚠ QQ 没装好。留空会自动下；也可填本地 deb 路径或直链后重跑部署")
         }
 
-        LogBus.log("[8/9] 打补丁 / 建路径别名 / 冻结热更新")
+        LogBus.log("[9/10] 打补丁 / 建路径别名 / 冻结热更新")
         Installer.patchAndFinish(this)
 
-        LogBus.log("[9/9] 拉起：虚拟屏 → 协议端 → QQ → 控制台")
+        LogBus.log("[10/10] 拉起：虚拟屏 → 协议端 → QQ → 控制台")
         Installer.vncPassword(this, "12345678")
         Installer.start(this)
 
@@ -170,13 +190,13 @@ class DeployService : Service() {
         // 让人误以为全好了。这里把每一步的真实结果摊开：就绪的 ✓，没就绪的 ✗ + 该做什么。
         LogBus.log("========== 本次部署结果（清单）==========")
         reportComponent("QQ Agent（大脑）", agentOk,
-            "重跑部署第 5 步（内置包解压即可，全程离线）；或手动：tar xzf /opt/qqstack/agent/qqagent.tar.gz" +
+            "重跑部署第 6 步（内置包解压即可，全程离线）；或手动：tar xzf /opt/qqstack/agent/qqagent.pkg" +
             " -C /opt/qqagent && cd /opt/qqagent && node src/server.js（不需要 npm install，也没有编译步骤）")
         reportComponent("SnowLuma（协议端）", snowOk,
-            "重跑部署；或手动下 SnowLuma-v2.1.1-linux-arm64.tar.gz 解到 /opt/snowluma（版本要和 QQ 配对）")
+            "重跑部署第 7 步；内置包在 assets 的 offline/snowluma.pkg（解压到 /opt/snowluma）")
         reportComponent("Linux 版 QQ", qqOk,
             "QQ 没装好 → 留空会自动下载，或在上方填本地 deb 路径/直链后重跑部署（须 3.2.32-52194 arm64）")
-        LogBus.log("  · 补丁/别名/热更新屏蔽/载荷导出：看上面 [8/9] 的输出")
+        LogBus.log("  · 补丁/别名/热更新屏蔽/载荷导出：看上面 [9/10] 的输出")
         LogBus.log("  · /proc/locks 补丁走的是方案 A 还是方案 B：cat ${Cfg.STACK}/.locks-patch-method")
         LogBus.log("  · 三大件当前状态复核：bash ${Cfg.STACK}/scripts/versions.sh")
         LogBus.log(if (agentOk && snowOk && qqOk)

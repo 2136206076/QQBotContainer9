@@ -118,7 +118,7 @@ pidfile_cmdline_key() {
   case "${1##*/}" in
     snowluma.pid)   printf '%s' 'index\.mjs' ;;        # 协议端：node <...>/index.mjs
     xvfb.pid)       printf '%s' 'Xvfb' ;;
-    fluxbox.pid)    printf '%s' 'fluxbox' ;;
+    openbox.pid)    printf '%s' 'openbox' ;;
     x11vnc.pid)     printf '%s' 'x11vnc' ;;
     websockify.pid) printf '%s' 'websockify' ;;
     # qqagent.pid 不在表里（有意为之）：控制台进程走上面的 is_agent_proc()，

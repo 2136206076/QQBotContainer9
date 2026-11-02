@@ -25,9 +25,9 @@ pgrep -x Xvfb >/dev/null 2>&1 || {
   Xvfb "$DISPLAY" -screen 0 1280x720x16 >/tmp/xvfb.log 2>&1 </dev/null &
   echo $! >"$RUN/xvfb.pid"; say "Xvfb $DISPLAY"; }
 sleep 2
-pgrep -x fluxbox >/dev/null 2>&1 || {
-  DISPLAY="$DISPLAY" fluxbox >/tmp/fluxbox.log 2>&1 </dev/null &
-  echo $! >"$RUN/fluxbox.pid"; }
+pgrep -x openbox >/dev/null 2>&1 || {
+  DISPLAY="$DISPLAY" openbox >/tmp/openbox.log 2>&1 </dev/null &
+  echo $! >"$RUN/openbox.pid"; }
 
 if ! pgrep -x x11vnc >/dev/null 2>&1; then
   if [ -f "${STACK_DIR:-/opt/qqstack}/vncpasswd" ]; then
@@ -176,6 +176,34 @@ fi
 # 会让协议端彻底没人管（pgrep 那一瞬间仍命中，于是整段被跳过）
 if [ "$SL_RESTARTED" = "1" ] || [ -z "$(sl_pids)" ]; then
   if [ -x "$SL_DIR/node" ] && [ -f "$SL_DIR/index.mjs" ]; then
+    # ---- 预置 OneBot 监听配置（只在「完全没有任何 onebot 配置」时写一次）----
+    # 不预置的话，SnowLuma 首次启动会给 http/ws 各生成一个随机 accessToken，
+    # 而 QQ Agent 默认不带令牌 → WS 握手 401 → 面板永远显示「未连接 OneBot」。
+    # 这里把两个监听器固定成 127.0.0.1 + 空令牌（本机回环，SnowLuma 允许空令牌），
+    # 端口取 deploy.env 的 BOT_HTTP / BOT_WS。用户之后在 WebUI 里改过就不再覆盖。
+    if [ ! -f "$SL_DIR/config/onebot.json" ] && ! ls "$SL_DIR"/config/onebot_*.json >/dev/null 2>&1; then
+      mkdir -p "$SL_DIR/config" 2>/dev/null && cat >"$SL_DIR/config/onebot.json" <<JSON
+{
+  "networks": {
+    "httpServers": [
+      { "name": "http-default", "host": "127.0.0.1", "port": ${BOT_HTTP:-3000}, "path": "/",
+        "enableWebSocket": false, "messageFormat": "array", "reportSelfMessage": false }
+    ],
+    "httpClients": [],
+    "wsServers": [
+      { "name": "ws-default", "host": "127.0.0.1", "port": ${BOT_WS:-3001}, "path": "/",
+        "role": "Universal", "messageFormat": "array", "reportSelfMessage": false }
+    ],
+    "wsClients": []
+  },
+  "statusCommand": { "enabled": true, "swallow": false, "cooldownSeconds": 5, "trigger": "#sl" },
+  "historySync": { "enabled": false },
+  "notifications": { "channelIds": [] }
+}
+JSON
+      [ -f "$SL_DIR/config/onebot.json" ] && echo "  · 已预置 OneBot 监听：http :${BOT_HTTP:-3000} / ws :${BOT_WS:-3001}（本机回环，无令牌）"
+    fi
+
     # 绝对路径启动：cmdline 里才会出现 .../snowluma/node，pgrep 判据才作数。
     # 仍然 cd 到该目录、./index.mjs 不改 —— 它内部按相对路径找 native/、config/ 之类。
     # exec 不能省：`cd && cmd &` 这种 and-list 后台化时 bash 可能再 fork 一层，
@@ -264,6 +292,23 @@ else
   say "QQ 已在运行，跳过"
 fi
 
+# ---------- 4.5) 对齐 OneBot 端口 / 令牌 ----------
+# SnowLuma 首次启动会给监听器随机生成 accessToken；QQ Agent 默认是空令牌，
+# 于是 WS 握手 401，面板一直显示「未连接 OneBot」—— 看起来像协议端没起来。
+# 这里把 SnowLuma 实际在用的端口/令牌抄进面板配置；变了就把在跑的面板踢掉，
+# 让下面第 5 步用新配置重启（它本来也连不上，重启没有额外代价）。
+SYNC_OUT=$(bash "$HERE/sync-onebot.sh" 8 2>&1)
+echo "$SYNC_OUT" | sed 's/^/  /'
+case "$SYNC_OUT" in
+  *CHANGED*)
+    if pgrep -f "qqagent/src/server\.js" >/dev/null 2>&1; then
+      echo "  · 面板配置已更新 → 重启控制台以生效"
+      pkill -f "qqagent/src/server\.js" 2>/dev/null || true
+      sleep 1
+    fi
+    ;;
+esac
+
 # ---------- 5) 控制台（QQ Agent，原版 JS，内置包离线安装）----------
 # 入口固定是 /opt/qqagent/src/server.js：纯 JavaScript + ESM，node 直接跑。
 # 依赖（ws / js-yaml / undici）已经内置在包的 node_modules 里 —— 不需要 npm install，
@@ -283,15 +328,20 @@ fi
 # 200，按端口判就会跳过启动 → 控制台永久停。杀过就无条件重启。
 if [ "${AGENT_RESTARTED:-0}" = "1" ] || [ "$(code "http://127.0.0.1:${AGENT_PORT:-3081}/")" != "200" ]; then
   AGENT_HOME="${AGENT_DIR:-/opt/qqagent}"
+  # 显式挑 node，不靠 PATH：容器里那套 node 是 SnowLuma 自带的（bootstrap 第 2 步
+  # 会软链到 /usr/bin/node），但 PATH 由 App 侧的 proot 环境决定，不一定包含 /usr/bin。
+  # 先认 SnowLuma 的、再认 PATH 里的，都没有就用裸 node（让报错落在日志里，而不是静默不启动）。
+  NODE_BIN="${NODE_BIN:-/opt/snowluma/node}"
+  [ -x "$NODE_BIN" ] || NODE_BIN="$(command -v node 2>/dev/null || echo node)"
   if [ -f "$AGENT_HOME/src/server.js" ]; then
     # 顺手写 pidfile（run/ 下，和 Xvfb/x11vnc 一个惯例）：stop-all.sh 靠它精确点名。
     # exec 不能省 —— `cd && nohup node &` 这种 and-list 后台化时 bash 可能再 fork 一层，
     # $! 就成了马甲 shell 的 pid、瞬间就退，pidfile 直接失效。
-    ( cd "$AGENT_HOME" && exec nohup node "$AGENT_HOME/src/server.js" >/tmp/qqagent.log 2>&1 </dev/null &
+    ( cd "$AGENT_HOME" && exec nohup "$NODE_BIN" "$AGENT_HOME/src/server.js" >/tmp/qqagent.log 2>&1 </dev/null &
       echo $! >"$RUN/qqagent.pid" )
-    say "控制台（node src/server.js，:${AGENT_PORT:-3081}）"
+    say "控制台（$NODE_BIN src/server.js，:${AGENT_PORT:-3081}）"
   else
-    say "跳过控制台：$AGENT_HOME/src/server.js 不存在（Agent 没装好？看部署第 5 步日志）"
+    say "跳过控制台：$AGENT_HOME/src/server.js 不存在（Agent 没装好？看部署第 6 步日志）"
   fi
 fi
 
@@ -311,10 +361,25 @@ echo "  控制台   http://127.0.0.1:${AGENT_PORT:-3081}（QQ Agent，要自备 
 echo "  协议端   http://127.0.0.1:${SLWEBUI_PORT:-5099}"
 echo "  扫码     noVNC: http://127.0.0.1:${NOVNC_PORT:-6081}/vnc.html"
 echo "           或手机装任意 VNC 客户端连 127.0.0.1:${VNC_PORT:-5900}"
-echo "  OneBot   ${BOT_HTTP:-3000}/$(code "http://127.0.0.1:${BOT_HTTP:-3000}/")  ${BOT_WS:-3001}/$(code "http://127.0.0.1:${BOT_WS:-3001}/")"
+OB=$(code "http://127.0.0.1:${BOT_HTTP:-3000}/")
+OBW=$(code "http://127.0.0.1:${BOT_WS:-3001}/")
+echo "  OneBot   ${BOT_HTTP:-3000}/$OB  ${BOT_WS:-3001}/$OBW"
 echo
-# 原版 qq-agent 没有 /api/overview；/api/onebot/groups 一举两得：
-# 能返回就证明控制台活着，200/502 又直接说明 OneBot 连没连上
-curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3081}/api/onebot/groups" 2>/dev/null | head -c 300; echo
+if [ "$OB" = "000" ] && [ "$OBW" = "000" ]; then
+  # 部署完还没扫码时一定会走到这里。以前直接打一行 ECONNREFUSED 的 JSON，看着像故障；
+  # 实际上 SnowLuma 要等 QQ 账号上线后才把 OneBot 端口开出来。
+  echo "  · OneBot 端口还没监听 —— 通常是「QQ 还没登录」：协议端要等账号上线后才开端口。"
+  echo "    扫码登录完成后回到这个界面点「启动」（或「重启协议端」），端口就会起来。"
+  echo "    已经登录过还是 000 → 看 /tmp/snowluma.log 与 /tmp/qqagent.log"
+else
+  # 原版 qq-agent 没有 /api/overview；/api/onebot/groups 一举两得：
+  # 能返回就证明控制台活着，200/502 又直接说明 OneBot 连没连上
+  G=$(curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3081}/api/onebot/groups" 2>/dev/null | head -c 300)
+  case "$G" in
+    \[*) echo "  ✓ 控制台 ↔ OneBot 已连通（群列表可读）" ;;
+    "")  echo "  · 控制台没响应（看 /tmp/qqagent.log）" ;;
+    *)   echo "  · 控制台自检：$G" ;;
+  esac
+fi
 echo
 echo "下一步：bash $HERE/status.sh"

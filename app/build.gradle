@@ -15,10 +15,23 @@ android {
         // 从 v1.0 升上来必须卸载重装一次 —— 旧包是 CI 每次现生成的证书，对不上。
         // v1.2：QQ Agent 换代（旧的 TypeScript 版 → 内置原版 0.4.0 离线包），
         //       版本号跳一位，方便用户确认装上的确实是新版。
-        versionCode 3
-        versionName "1.2"
+        // v1.3：全离线化 —— rootfs / 290 个 arm64 依赖包 / SnowLuma / noVNC / hook
+        //       全部打进 APK，部署时只解压不联网（只剩 QQ 安装包还要下）。
+        // v1.3.1：修 v1.2 日志里暴露的四个问题 —— linuxqq 半配置态、热更新屏蔽未生效、
+        //       未登录时 OneBot 端口 000 被误报成故障、导出日志里签名指纹恒为「未知」。
+        // v1.3.2：OneBot 令牌自动对齐（协议端随机令牌 vs 面板空令牌 → 永远连不上）；
+        //       面板 UI 手机适配（mobile.css / mobile.js，列表与详情单栏切换）。
+        versionCode 6
+        versionName "1.3.2"
         // 只做 arm64：QQ / SnowLuma / hook 都是 aarch64
         ndk { abiFilters 'arm64-v8a' }
+    }
+
+    // offline/ 下都是已经压过的东西（.deb 是 xz、rootfs 与 SnowLuma 是 gzip），
+    // 再让 aapt 压一遍只是白白多花几分钟构建时间，压缩率还不到 1%。
+    // 不压的另一个好处：安装后 assets 可以直接按原始偏移读，解压更快。
+    androidResources {
+        noCompress += ['pkg', 'so']
     }
 
     // legacyPackaging=true：把 .so 原样解压到 nativeLibraryDir，
@@ -153,4 +166,65 @@ tasks.register("verifyApkSignature") {
 // 任何一次 assembleDebug / assembleRelease 结束都会跟一次校验
 tasks.matching { it.name == "assembleDebug" || it.name == "assembleRelease" }.configureEach {
     finalizedBy "verifyApkSignature"
+}
+
+// ---------------------------------------------------------------------------
+// 内置离线资源（274MB）：不在仓库里，构建时从 Release 下。
+//
+// 为什么不提交进仓库：
+//   1. pkgs-a.pkg / pkgs-b.pkg 各 97MB，已经贴着 GitHub 单文件 100MiB 上限，
+//      再大一点就直接 push 被拒；
+//   2. 这些是二进制大块，git 压不动，仓库历史会线性膨胀，clone 越来越慢；
+//   3. 换个资源就要重写历史，不划算。
+// 放在 Release（tag = offline-v1.3.2）上，单文件限额 2GB，且可以单独替换。
+//
+// 本地已经有这些文件时直接跳过，所以日常 Build > Run 不受影响。
+tasks.register('fetchOfflineAssets') {
+    description = '下载 APK 内置的离线资源（rootfs / 290 个 deb / SnowLuma / noVNC）'
+    group = 'build'
+
+    def manifest = [
+        'rootfs.pkg'  : 29870567L,
+        'pkgs-a.pkg'  : 101990400L,
+        'pkgs-b.pkg'  : 101990400L,
+        'snowluma.pkg': 51816108L,
+        'novnc.pkg'   : 993280L,
+    ]
+    def tag = 'offline-v1.3.2'
+    def base = "https://github.com/2136206076/QQBotContainer9/releases/download/${tag}"
+
+    doLast {
+        def dir = file('src/main/assets/qqstack/offline')
+        dir.mkdirs()
+        manifest.each { name, size ->
+            def f = new File(dir, name)
+            if (f.exists() && f.length() == size) {
+                logger.lifecycle("· 离线资源 ${name} 已就位")
+                return
+            }
+            logger.lifecycle("↓ 下载离线资源 ${name}（${(size / 1048576).round()}MB）")
+            def tmp = new File(dir, "${name}.part")
+            try {
+                new URL("${base}/${name}").openStream().withCloseable { inp ->
+                    tmp.withOutputStream { out -> out << inp }
+                }
+                if (tmp.length() != size) {
+                    throw new GradleException("${name} 大小不符：期望 ${size}，实得 ${tmp.length()}\n"
+                        + "  可能是 Release 资产被替换过，或 tag ${tag} 不存在")
+                }
+                if (f.exists()) f.delete()
+                if (!tmp.renameTo(f)) {
+                    throw new GradleException("${name} 下载完成但改名失败")
+                }
+            } finally {
+                if (tmp.exists()) tmp.delete()
+            }
+        }
+        logger.lifecycle('✓ 离线资源齐备')
+    }
+}
+
+// preBuild 是一切编译/打包任务的根，挂在它上面能保证 mergeAssets 之前文件就位
+tasks.configureEach { t ->
+    if (t.name == 'preBuild') t.dependsOn 'fetchOfflineAssets'
 }

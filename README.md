@@ -1,9 +1,14 @@
 # QQBotContainer —— 手机端 QQ 机器人专用容器 App
 
-一个**只服务这一种用途**的安卓容器 App：打开 → 点「一键部署」→ 自己去拉 Ubuntu、装依赖、
-编 hook、拉起 QQ + SnowLuma + QQ Agent，全程在 App 内完成，不用 Termux、不用 adb、不用敲命令。
+一个**只服务这一种用途**的安卓容器 App：打开 → 点「一键部署」→ 解压 APK 里自带的 Ubuntu、
+依赖包、协议端，拉起 QQ + SnowLuma + QQ Agent，全程在 App 内完成，不用 Termux、不用 adb、不用敲命令。
 
-> 前提：arm64 安卓手机（不支持 32 位）。Android 11+。建议 6GB 内存、留 4GB 空间。
+**v1.3 起全离线**：除了 Linux 版 QQ 的 deb（约 200MB）之外，App 需要的东西全部预置在 APK 里 ——
+Ubuntu 根文件系统、290 个 arm64 系统包、SnowLuma 协议端（含自带的 Node 24）、noVNC、hook 载入器。
+部署时一个字节都不下载，断网也能装完（QQ 那一步仍需联网或手动给包）。
+
+> 前提：arm64 安卓手机（不支持 32 位）。Android 11+。建议 6GB 内存、安装前留 **3GB** 空间
+> （APK 约 280MB，展开后容器约 1.1GB）。
 
 ---
 
@@ -29,15 +34,16 @@
 
 ```
 点「一键部署」
-  [1/9] 下载 Ubuntu Base 24.04 arm64（28MB）并解压        ← 自动，多源兜底
-  [2/9] 写 resolv.conf / hosts（含屏蔽 QQ 热更新）/ apt 源
-  [3/9] 把部署脚本放进容器 /opt/qqstack
-  [4/9] apt 装包 + 换 Node 22 + 用 gcc 编出 hook 载入器     ← 最慢，5~15 分钟
-  [5/9] 安装 QQ Agent（内置 2.7MB 离线包直接解压：免联网 / 免 npm install / 免编译）
-  [6/9] 下载 SnowLuma 2.1.1 linux-arm64
-  [7/9] 装 Linux 版 QQ（**这一步需要你给一个包**）
-  [8/9] /proc/locks 补丁（能读就跳过）+ 路径别名 + 冻结热更新
-  [9/9] 拉起：虚拟屏 → 协议端 → 带 hook 的 QQ → 控制台
+  [1/10] 解压内置 Ubuntu Base 24.04 arm64（29MB，不联网）
+  [2/10] 写 resolv.conf / hosts（含屏蔽 QQ 热更新）/ apt 源
+  [3/10] 把部署脚本放进容器 /opt/qqstack
+  [4/10] 解压内置 SnowLuma(50MB) / noVNC / 290 个 arm64 deb（两片各 98MB）
+  [5/10] dpkg 本地装包 + 复用 SnowLuma 的 Node 24 + 放入预编译 hook   ← 最慢，5~15 分钟
+  [6/10] 安装 QQ Agent（内置 2.7MB 离线包直接解压：免联网 / 免 npm install / 免编译）
+  [7/10] 核对 SnowLuma 协议端
+  [8/10] 装 Linux 版 QQ（**只有这一步需要联网，或手动给包**）
+  [9/10] /proc/locks 补丁（能读就跳过）+ 路径别名 + 冻结热更新
+  [10/10] 拉起：虚拟屏 → 协议端 → 带 hook 的 QQ → 控制台
 ```
 
 跑完点「扫码登录」看二维码，「控制台」配模型和白名单。
@@ -275,7 +281,29 @@ API Key 会自动迁移：依次找 旧 `data/config.json` 的 `api.{baseUrl,api
 
 ---
 
-## 9. 许可
+## 9. 修了什么（v1.3.1 / v1.3.2）
+
+| 日志里的现象 | 根因 | 修法 |
+|---|---|---|
+| `linuxqq.postinst: line 10: update-desktop-database: command not found` | 容器里没有 `desktop-file-utils`，postinst 非 0 退出 → dpkg 把 linuxqq 停在 **half-configured**，之后每次 dpkg/apt 都重复报错 | 装包前先放 `update-desktop-database` / `update-mime-database` / `gtk-update-icon-cache` / `xdg-desktop-menu` 的返回 0 桩；QQ 装完再查一次 dpkg 状态，仍是半配置就 `dpkg --configure linuxqq` 补配 |
+| `[freeze] hosts 已屏蔽` 但 `⚠ 解析结果：<真实 IP>（未生效）` | 条目虽然写进去了，但解析没走 /etc/hosts | 重写 hosts（去 CR、去重复条目）+ 强制 `nsswitch.conf` 为 `hosts: files dns`（`dns ... files` 这种写法会绕过 hosts）；仍不生效时把条目原文 `cat -A` 打进日志，方便定位 |
+| `OneBot 3000/000`、`ECONNREFUSED 127.0.0.1:3000` | QQ 还没登录时协议端不会开 OneBot 端口，这是**正常状态**，但旧日志直接甩一行 JSON，看着像故障 | 启动脚本分开处理：端口 000 时明确写「QQ 还没登录，扫码后回来点启动」，只有真连上时才去查群列表 |
+| 导出日志里 `签名SHA256: 未知` | 读包信息时 flags 传了 0，Android 13+ 拿不到 `signingInfo` | 改成带 `GET_SIGNING_CERTIFICATES`（低版本 `GET_SIGNATURES`）读取 |
+| 部署中途弹「等待超时，已恢复按钮」 | 旧版联网装 300MB 依赖 + 编译 hook，跑过 20 分钟 | v1.3 起全离线，UI 超时同时放宽到 40 分钟 |
+| QQ 明明登录了，面板却一直「未连接 OneBot」 | SnowLuma 首启会给 OneBot 监听器**随机生成 accessToken**，而面板默认令牌是空的 → WS 握手 401。看起来像协议端没起来，实际端口在监听 | ① 启动时预置 `config/onebot.json`（127.0.0.1 + 空令牌，SnowLuma 允许回环免令牌）；② 每次启动跑 `sync-onebot.sh`，把协议端真实令牌抄进面板配置，变了就重启面板；③ `versions.sh` 增加令牌对账行 |
+| 面板在手机上没法用（两栏各不到 200px，字被挤成竖排） | 上游 UI 是桌面优先：会话/存档/记忆是「288px 列表 + 详情」，设置页是「240px 侧栏 + 表单」，只有 3 条媒体查询 | 内置 `ui/mobile.css` + `ui/mobile.js`（≤760px）：两栏改单栏「列表 ↔ 详情」切换（左下角返回按钮）、设置侧栏改横向胶囊条、顶栏收成一行、表格横向滚动、输入框 16px 防聚焦缩放；桌面版式完全不动 |
+
+## 9.1 手机面板怎么用
+
+- 打开「控制台」→ 默认进列表页，点条目进详情，左下角「‹ 返回列表」退回
+- 顶部只剩「OneBot 状态」一个胶囊（模型/用量/搜索计数在各自页签里），点进去横滑可看到全部页签
+- 设置页的左侧菜单变成横向胶囊条，横滑选择；右侧表单吃满整屏宽度
+
+
+
+---
+
+## 10. 许可
 
 App 自身代码随意使用。注意 **proot 是 GPL-2.0、libtalloc 是 LGPL-3.0**，
 你分发 APK 时需要同时提供这两个的源码（链接见 `app/src/main/jniLibs/README.md`）。

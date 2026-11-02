@@ -146,7 +146,8 @@ object LogExporter {
         val sig = if (Build.VERSION.SDK_INT >= 28) {
             val info = pi.signingInfo
             when {
-                info == null -> null
+                // 少数机型/魔改 ROM 拿不到 SigningInfo，退回已废弃的 signatures 字段
+                info == null -> pi.signatures?.firstOrNull()
                 // 多签名（APK 签名方案轮转）时 signingCertificateHistory 会抛异常，
                 // 必须先判 hasMultipleSigners 再决定走哪条路
                 info.hasMultipleSigners() -> info.apkContentsSigners?.firstOrNull()
@@ -163,10 +164,17 @@ object LogExporter {
     @Suppress("DEPRECATION")
     private fun packageInfo(ctx: Context): PackageInfo? = try {
         val pm = ctx.packageManager
-        if (Build.VERSION.SDK_INT >= 33) {
-            pm.getPackageInfo(ctx.packageName, PackageManager.PackageInfoFlags.of(0))
+        // 必须带签名标志位：flags 传 0 时，Android 13+ 的 pi.signingInfo 恒为 null，
+        // 导出的「签名SHA256」就永远是「未知」—— 而这一行正是判断「能不能覆盖安装」的关键。
+        val flags = if (Build.VERSION.SDK_INT >= 28) {
+            PackageManager.GET_SIGNING_CERTIFICATES
         } else {
-            pm.getPackageInfo(ctx.packageName, 0)
+            PackageManager.GET_SIGNATURES
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            pm.getPackageInfo(ctx.packageName, PackageManager.PackageInfoFlags.of(flags.toLong()))
+        } else {
+            pm.getPackageInfo(ctx.packageName, flags)
         }
     } catch (_: Throwable) {
         null

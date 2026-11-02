@@ -6,3 +6,8 @@ local.properties
 *.pyc
 .idea/
 *.iml
+
+# 内置离线资源 274MB：超过 GitHub 单文件 100MiB 上限，改放 Release
+# （tag=offline-v1.3.2），构建时由 app/build.gradle 的 fetchOfflineAssets 自动下载。
+app/src/main/assets/qqstack/offline/*.pkg
+app/src/main/assets/qqstack/offline/*.part

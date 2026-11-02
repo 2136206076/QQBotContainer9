@@ -119,16 +119,19 @@ for f in libslhook.so libsnowluma_linux_resident_dispatch.so; do
       info "  ↳ 或跑一次诊断" "bash $HERE/slhook-diag.sh（它的第 0 步会自动补导出）"
       ;;
     libslhook.so)
-      bad "$f" "缺失 → 它是容器里用 gcc 现编的，需要重跑部署第 4 步（[4/9] 用 gcc 编出 hook 载入器）"
-      info "  ↳ 手动补编" "gcc -shared -fPIC -O2 -o $STACK_DIR/libslhook.so $HERE/../bin/slhook.c -ldl"
+      bad "$f" "缺失 → APK 内置了预编译版，重跑部署第 4 步（[5/10] 会把 bin/libslhook.so 放到位）"
+      info "  ↳ 手动补" "cp $HERE/../bin/libslhook.so $STACK_DIR/libslhook.so"
       ;;
     *) bad "$f" "缺失" ;;
   esac
 done
 [ -f "$SNOWLUMA_DIR/native/snowluma-linux-arm64.so" ] && info "hook 主 so" "$(md5sum "$SNOWLUMA_DIR/native/snowluma-linux-arm64.so" | cut -d' ' -f1)" || bad "hook 主 so" "缺失"
-for pkg in xvfb x11vnc novnc websockify fluxbox imagemagick; do
+# noVNC 不再走 apt（novnc 包会硬拉系统 nodejs 18，和 SnowLuma 的 node 抢 /usr/bin/node），
+# 改成 APK 内置的静态文件，所以这里查目录而不是 dpkg。
+for pkg in xvfb x11vnc websockify openbox; do
   dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok" && info "包 $pkg" "已装" || bad "包 $pkg" "未装"
 done
+[ -f /usr/share/novnc/vnc.html ] && info "noVNC 静态文件" "已就位" || bad "noVNC 静态文件" "缺失（扫码页面打不开，重跑部署第 4 步）"
 echo
 echo "== QQ 热更新状态（重点）=="
 VCFG=${QQ_HOME:-/root}/.config/QQ/versions/config.json
@@ -147,10 +150,60 @@ grep -q "qqpatch.gtimg.cn" /etc/hosts 2>/dev/null && ok "热更新域名已屏�
 echo
 echo "== 运行态 =="
 info "QQ 进程" "$(pgrep -c -x qq 2>/dev/null || echo 0) 个"
+# linuxqq 的 postinst 依赖 update-desktop-database；容器里没有那个包时 postinst 会失败，
+# dpkg 就把包装成 half-configured（文件都在、能跑，但每次 dpkg/apt 都重复报错）。
+QQST=$(dpkg-query -W -f='${Status}' linuxqq 2>/dev/null || true)
+case "$QQST" in
+  *"install ok installed") ok "linuxqq 包状态" "已配置" ;;
+  "") info "linuxqq 包状态" "查不到（可能是 tar 包装的）" ;;
+  *) bad "linuxqq 包状态" "$QQST → 执行 dpkg --configure linuxqq 修一下" ;;
+esac
 Q=$(pgrep -x qq 2>/dev/null | head -1)
 [ -n "$Q" ] && { grep -qa snowluma-linux-arm64.so /proc/$Q/maps && ok "hook 已注入" "是" || bad "hook 已注入" "否"; }
-info "OneBot ${BOT_HTTP:-3000}/${BOT_WS:-3001}" "$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${BOT_HTTP:-3000}/) / $(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${BOT_WS:-3001}/)"
+OB=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${BOT_HTTP:-3000}/")
+OBW=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${BOT_WS:-3001}/")
+if [ "$OB" = "000" ] && [ "$OBW" = "000" ]; then
+  info "OneBot ${BOT_HTTP:-3000}/${BOT_WS:-3001}" "000/000 —— 端口没监听；QQ 未登录时是正常状态"
+else
+  info "OneBot ${BOT_HTTP:-3000}/${BOT_WS:-3001}" "$OB / $OBW"
+fi
 info "控制台 ${AGENT_PORT:-3081}" "$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${AGENT_PORT:-3081}/)"
+
+# ---- OneBot 令牌对账 ----
+# 协议端（SnowLuma）每次首启都会随机生成 accessToken；面板这边默认是空的。
+# 两边不一致时：端口在监听、QQ 也登录了，但 WS 握手 401 → 面板永远显示「未连接」。
+TOKCHK=$(python3 - "$SNOWLUMA_DIR" "${AGENT_DIR:-/opt/qqagent}/data/config.json" <<'PY'
+import glob, json, os, sys
+sl, cfg = sys.argv[1], sys.argv[2]
+def load(p):
+    try:
+        with open(p, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+files = []
+g = os.path.join(sl, 'config', 'onebot.json')
+if os.path.isfile(g):
+    files.append(g)
+files += sorted(glob.glob(os.path.join(sl, 'config', 'onebot_*.json')), key=os.path.getmtime, reverse=True)
+files = [p for p in files if os.path.isfile(p)]
+if not files or not os.path.isfile(cfg):
+    print('SKIP'); raise SystemExit
+d = load(files[-1]) or {}
+nets = d.get('networks') if isinstance(d.get('networks'), dict) else d
+ws = [a for a in (nets.get('wsServers') or []) if isinstance(a, dict) and a.get('enabled') is not False]
+tok = str((ws[0].get('accessToken') or '')) if ws else ''
+c = load(cfg) or {}
+atok = str((c.get('onebot') or {}).get('accessToken') or '')
+print('MATCH' if tok == atok else 'MISMATCH 协议端令牌=%s 面板令牌=%s' % ('有' if tok else '空', '有' if atok else '空'))
+PY
+)
+case "$TOKCHK" in
+  MATCH)     ok  "OneBot 令牌" "面板与协议端一致" ;;
+  SKIP)      info "OneBot 令牌" "还没有协议端配置（未登录 / 协议端没起来）" ;;
+  MISMATCH*) bad "OneBot 令牌" "不一致（${TOKCHK#MISMATCH }）→ bash scripts/sync-onebot.sh 后重启控制台" ;;
+  *)         info "OneBot 令牌" "${TOKCHK:-读取失败}" ;;
+esac
 echo
 echo "注意：Android 的「幽灵进程杀手」在容器里查不到，请按文档用 adb 确认已关闭，"
 echo "      否则 QQ（十几个子进程）会在后台被系统悄悄杀掉。"
