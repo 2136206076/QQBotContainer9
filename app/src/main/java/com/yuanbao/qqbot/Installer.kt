@@ -876,6 +876,11 @@ PY
         return false
     }
 
+    /** 锁定 QQ 版本：把 /opt/QQ 递归设为只读，linuxqq 的自动更新器无法覆盖写入。 */
+    private fun pinQQ(ctx: Context): Int {
+        return Proot.run(ctx, "bash /opt/qqstack/scripts/pin-qq.sh 2>&1", tag = "pin")
+    }
+
     fun installQQ(ctx: Context, source: String): Boolean {
         if (Proot.run(ctx, "[ -f /opt/QQ/resources/app/package.json ] && exit 0 || exit 9",
                 tag = "qqchk") == 0) {
@@ -899,6 +904,7 @@ PY
                     ;;
                 esac
             """.trimIndent(), tag = "qq")
+            pinQQ(ctx)
             return true
         }
         val src = source.trim()
@@ -1051,8 +1057,14 @@ PY
             [ -f /opt/QQ/resources/app/package.json ] || { echo "安装后没有 /opt/QQ"; exit 1; }
         """.trimIndent()
         val rc = Proot.run(ctx, script, tag = "qq")
-        if (rc != 0) LogBus.log("✗ QQ 安装失败($rc)。请确认包是 3.2.32 arm64 的 deb/tar.gz")
-        return rc == 0
+        if (rc != 0) {
+            LogBus.log("✗ QQ 安装失败($rc)。请确认包是 3.2.32 arm64 的 deb/tar.gz")
+            return false
+        }
+        // 装完立刻锁版本：linuxqq NT 会在运行时自动下载更新并覆盖 /opt/QQ，
+        // 更新逻辑加密在 application.asar 里无法改配置关掉，只能文件系统层钉死。
+        pinQQ(ctx)
+        return true
     }
 
     fun patchAndFinish(ctx: Context) {

@@ -20,6 +20,18 @@ code() { curl -s -m 2 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null; }
 bash "$HERE/freeze-hotupdate.sh" 2>&1 | sed 's/^/  /'
 bash "$HERE/mkpath-alias.sh"     2>&1 | sed 's/^/  /'
 
+# ---------- 0.5) 锁定 QQ 版本（防 linuxqq 自动更新）----------
+# 每次拉起都重新断言一次：/opt/QQ 必须是只读的。linuxqq NT 的更新逻辑加密在
+# application.asar 里没法改配置关掉，只能从文件系统层把版本钉死。
+if [ -x "$HERE/pin-qq.sh" ]; then
+  bash "$HERE/pin-qq.sh" 2>&1 | sed 's/^/  /'
+else
+  QQ_DIR="${QQ_DIR:-/opt/QQ}"
+  [ -d "$QQ_DIR" ] && chmod -R a-w "$QQ_DIR" 2>/dev/null \
+    && find "$QQ_DIR" -type d -exec chmod a+x {} + 2>/dev/null \
+    && echo "  · 已锁定 $QQ_DIR 为只读（pin-qq.sh 缺失，使用兜底逻辑）"
+fi
+
 # ---------- 1) 虚拟桌面 ----------
 pgrep -x Xvfb >/dev/null 2>&1 || {
   Xvfb "$DISPLAY" -screen 0 1280x720x16 >/tmp/xvfb.log 2>&1 </dev/null &
