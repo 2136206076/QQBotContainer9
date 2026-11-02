@@ -11,6 +11,13 @@ say "环境" "$( [ -d /opt/qqstack ] && echo '容器内' || echo '（未部署�
 say "Xvfb"     "$(p Xvfb)"
 say "x11vnc"   "$(p x11vnc)"
 say "QQ"       "$(p qq)"
+# QQ 登录成功后会在 ~/.config/QQ/<uin>/ 建目录 —— 这是"真的登上了"最直接的证据。
+# 扫不到账号目录就说明还在扫码页，此时 OneBot 一定不会就绪，省得用户怀疑 hook。
+QQ_UIN=""
+for d in "${QQ_HOME:-/root}"/.config/QQ/[0-9]*; do
+  [ -d "$d" ] && { QQ_UIN=$(basename "$d"); break; }
+done
+say "QQ 账号" "${QQ_UIN:-未登录（扫码后点一次「启动」）}"
 say "hook 已加载" "$(for q in $(pgrep -x qq 2>/dev/null); do grep -qa snowluma-linux-arm64.so /proc/$q/maps 2>/dev/null && { echo 是; break; }; done)"
 say "SnowLuma" "$(pgrep -f 'snowluma/nod[e]' >/dev/null 2>&1 && echo 运行中 || echo 未运行)"
 say "OneBot ${BOT_HTTP:-3000}" "$(code http://127.0.0.1:${BOT_HTTP:-3000}/)  (401/403=正常)"
@@ -30,10 +37,20 @@ try:
     rt=d.get('runtime') or {}
     ob=rt.get('onebot') or {}
     conn=rt.get('napcatConnected', ob.get('connected', False))
+    raw_acc=ob.get('accountReady')
+    acc=None if raw_acc is None else bool(raw_acc)
     sid=rt.get('selfId') or 0
     nick=rt.get('nickname') or ''
     who='%s(%s)' % (nick, sid) if sid else (nick or '')
     print('OneBot :', '已连接' if conn else '未连接', who)
+    # 未连接时把根因说清楚：光一句"未连接"用户没法自救，只能来回猜
+    if not conn:
+        if acc is False:
+            print('  原因   :', '协议端没识别到账号（accountReady=false）')
+            print('  建议   :', '点「启动」（会重启协议端+控制台，QQ 不用重新扫码）')
+        elif acc is True:
+            print('  原因   :', '账号已识别但 WebSocket 未连上（看 /tmp/qqagent.log）')
+            print('  建议   :', '点「启动」（会重启协议端+控制台，QQ 不用重新扫码）')
     llm=d.get('llm') or {}
     prov=llm.get('defaultProvider') or ''
     model=llm.get('defaultModel') or ''

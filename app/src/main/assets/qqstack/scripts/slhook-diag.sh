@@ -38,9 +38,25 @@ echo "========== 1. 进程 =========="
 echo "QQ 主进程: ${Q:-（没在跑）}"
 [ -n "${Q:-}" ] && echo "hook 是否已装进这个进程:" && grep -a "snowluma-linux-arm64.so" /proc/$Q/maps 2>/dev/null | awk '{print "  "$6}' | sort -u
 echo "========== 2. wrapper.node 的加载方式（关键） =========="
-if [ -n "${Q:-}" ]; then
-grep -a wrapper /proc/$Q/maps 2>/dev/null | awk '{print $6}' | sort -u | sed 's/^/  /'
-echo "  —— 出现 /proc/self/fd/ 或 memfd: 表示"从内存加载"，出现磁盘路径表示"从磁盘加载""
+# 以前只查 $Q（主进程）一个 pid —— QQ 是多进程的，wrapper.node 往往由别的子进程加载，
+# 只盯主进程就会看到"一片空白"，误判成 hook 没生效。这里扫全部 qq 进程，逐个报告。
+if pgrep -x qq >/dev/null 2>&1; then
+FOUND_WRAPPER=0
+for p in $(pgrep -x qq 2>/dev/null); do
+  W=$(grep -a "wrapper.node" /proc/$p/maps 2>/dev/null | awk '{print $6}' | sort -u)
+  if [ -n "$W" ]; then
+    echo "  ✓ pid=$p 已加载 wrapper.node:"
+    echo "$W" | sed 's/^/      /'
+    FOUND_WRAPPER=1
+  fi
+done
+if [ "$FOUND_WRAPPER" = "0" ]; then
+  echo "  ✗ 所有 $(pgrep -x qq 2>/dev/null | wc -l) 个 QQ 进程都**没有**加载 wrapper.node"
+  echo "    → hook 还在 'waiting wrapper.node'，SnowLuma 拿不到数据，OneBot 永远不会就绪"
+  echo "    → 先确认 QQ 是否真的登录成功（看下面的「QQ 登录态」），再点「启动」重试"
+else
+  echo "  —— 出现 /proc/self/fd/ 或 memfd: 表示从内存加载，出现磁盘路径表示从磁盘加载"
+fi
 else
 echo "  （QQ 没跑，跳过）"
 fi
@@ -93,6 +109,61 @@ fi
 echo "  —— 补丁脚本退出码：0=正常（方案 A 成功 / 已打过跳过 / 按设计不用打）；"
 echo "                     3=⚠ 降级到方案 B（替身文件兜底），属降级成功，别中断部署但要看一眼；"
 echo "                     其它=失败"
+echo "========== 8. 账号识别与 OneBot 连接 =========="
+# a) QQ 登录态：QQ 登录成功后会在 ~/.config/QQ/<uin>/ 建目录，这是"真的登上了"最直接的证据
+QH="${QQ_HOME:-/root}"
+QQ_UIN=""
+for d in "$QH"/.config/QQ/[0-9]*; do
+[ -d "$d" ] && { QQ_UIN="$QQ_UIN $(basename "$d")"; }
+done
+if [ -n "$QQ_UIN" ]; then
+for u in $QQ_UIN; do echo "  ✓ QQ 账号 $u（已登录）"; done
+else
+echo "  ✗ 没找到账号目录 —— QQ 还没真正登录（去「扫码登录」里扫码）"
+fi
+# b) 协议端只是在监听 ≠ 账号就绪：401/403 是鉴权中间件在挡，跟 accountReady 无关
+C3000="$(curl -s -m 3 "http://127.0.0.1:${BOT_HTTP:-3000}/" -o /dev/null -w '%{http_code}' 2>/dev/null)"
+echo "  · 协议端 ${BOT_HTTP:-3000} → HTTP ${C3000:-无响应}（401/403 只说明服务在监听，不代表账号已识别）"
+# c) Agent 侧的"真实"连接态：以 /api/overview 为准，字段取不到就打 ?，绝不伪造
+OV="$(curl -s -m 4 "http://127.0.0.1:${AGENT_PORT:-3081}/api/overview" 2>/dev/null)"
+if [ -n "$OV" ]; then
+echo "$OV" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('  · 控制台 /api/overview 不是 JSON —— 控制台可能没起来（日志：tail -20 /tmp/qqagent.log）')
+    raise SystemExit(0)
+rt = d.get('runtime') or {}
+ob = rt.get('onebot') or {}
+def show(v):
+    if v is None:
+        return '?'
+    if v is True:
+        return 'true'
+    if v is False:
+        return 'false'
+    return str(v)
+nap = rt.get('napcatConnected')
+acc = ob.get('accountReady')
+print('  · napcatConnected       = ' + show(nap))
+print('  · onebot.connected      = ' + show(ob.get('connected')))
+print('  · onebot.accountReady   = ' + show(acc))
+print('  · onebot.apiReady       = ' + show(ob.get('apiReady')))
+# 只看 acc：与 status.sh 同一口径（accountReady 才代表协议端真认到了账号，
+# napcatConnected 只是「WS 有没有连上」，连上但没识别账号时它是 true，混在一起看会漏报）
+if acc is False:
+    print('    → 账号未识别：点「启动」（会重启协议端+控制台，QQ 不用重新扫码）')
+"
+else
+echo "  · 控制台 /api/overview 取不到 —— 控制台没起？（日志：tail -20 /tmp/qqagent.log）"
+fi
+# d) 两端日志尾巴：一眼就能看出 SnowLuma 是停在 awaiting readiness 还是真的没扫到账号
+for L in /tmp/snowluma.log /tmp/qqagent.log; do
+[ -f "$L" ] || continue
+echo "  --- $L (tail -8)"
+tail -8 "$L" | sed 's/^/    /'
+done
 echo
 echo "判读方法："
 echo "  · 第 0 步说「缺 …」又被补回来了     → 已自愈，重跑 start-all.sh 让 QQ 装上 hook"
@@ -100,3 +171,5 @@ echo "  · 有 'resident dispatch <- ... (ok)'      → hook 完整，问题在 
 echo "  · 有 'resident dispatch <- ... (失败原因)'  → 载荷路径或文件坏了，或第 3 步别名没建"
 echo "  · 一行都没有                              → stub 压根没调 dlopen，用 SLHOOK_VERBOSE=1 重启 QQ"
 echo "      在 deploy.env 里加 SLHOOK_VERBOSE=1，再 grep slhook /tmp/qq.log"
+echo "  · 第 2 步说「所有进程都没加载 wrapper.node」 → QQ 没真正登录完，或 wrapper 未加载，先看第 8 步的登录态"
+echo "  · 第 8 步 accountReady=false 但 QQ 账号已登录 → 协议端没重扫，点「启动」即可（会自动重启协议端）"

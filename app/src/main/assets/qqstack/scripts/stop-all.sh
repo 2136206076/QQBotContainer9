@@ -66,7 +66,12 @@ is_agent_proc() {
 }
 
 L="$AGENT_DIR/data/qq-agent.lock"
-[ -f "$L" ] && kill "$(tr -dc '0-9' < "$L")" 2>/dev/null   # 老版本残留，命中就顺手杀掉，不命中无害
+# 老版本残留的 lock：同样只当线索，cmdline 校验通过才杀 —— lock 文件在 rootfs 里跨重启保留，
+# PID 被复用时裸 kill 会误伤无辜进程
+if [ -f "$L" ]; then
+  lp=$(tr -dc '0-9' < "$L" 2>/dev/null || true)
+  [ -n "$lp" ] && grep -qa -e 'index\.js' -e 'index\.ts' "/proc/$lp/cmdline" 2>/dev/null && kill "$lp" 2>/dev/null
+fi
 
 # 路线 1：pidfile（start-all.sh 写的）。先校验再杀，pid 被复用时不会杀错人
 if [ -f "$AGENT_PID_FILE" ]; then
@@ -96,12 +101,56 @@ for p in $AGENT_PIDS; do
   [ -d "/proc/$p" ] && { kill -KILL "$p" 2>/dev/null || true; }
 done
 
-sleep 2
-pkill -9 -x qq 2>/dev/null
-for f in "$STACK_DIR"/run/*.pid; do [ -f "$f" ] || continue; kill "$(cat "$f")" 2>/dev/null; done
+# ---- run/*.pid 收尾 ----
+# 这里的 pidfile 只当"线索"，不能当"事实"。run/ 在 rootfs 里跨重启保留，而 PID 会被系统
+# 复用：老号码被别的无关进程接手时，裸 kill "$(cat "$f")" 就会把无辜进程杀掉 —— 和文件
+# 开头那段注释讲的是同一件事（那里已经用 scan_cmdline 校验控制台进程，这里一并收口）。
+# 做法：按 pidfile 文件名推断该进程"命令行里必须出现的特征"，/proc/<pid>/cmdline 里真匹配
+# 上了才 kill。认不出来的 pidfile 一律不杀 —— 宁可漏杀（残留的 Xvfb/协议端下次 start 会
+# 收拾），也不要误杀。所有失败路径都 return 0：stop-all 必须能一路跑完把状态打出来。
+pidfile_cmdline_key() {
+  case "${1##*/}" in
+    snowluma.pid)   printf '%s' 'index\.mjs' ;;        # 协议端：node <...>/index.mjs
+    qqagent.pid)    printf '%s' 'index\.\(js\|ts\)' ;; # 控制台：dist/src/index.js 或 src/index.ts
+    xvfb.pid)       printf '%s' 'Xvfb' ;;
+    fluxbox.pid)    printf '%s' 'fluxbox' ;;
+    x11vnc.pid)     printf '%s' 'x11vnc' ;;
+    websockify.pid) printf '%s' 'websockify' ;;
+    *)              return 1 ;;
+  esac
+  return 0
+}
+
+kill_from_pidfile() {
+  local f="${1:-}" pid="" key="" name=""
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  name="${f##*/}"
+  key="$(pidfile_cmdline_key "$f" 2>/dev/null || true)"
+  if [ -z "$key" ]; then
+    echo "· 跳过 run/$name：未知 pidfile，无法校验身份，不杀"
+    return 0
+  fi
+  # 号码可能带换行/空格，只留数字
+  pid="$(tr -dc '0-9' < "$f" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 0
+  [ "$pid" = "$$" ] && return 0
+  # /proc 项没了说明进程早退，没什么可杀的
+  [ -r "/proc/$pid/cmdline" ] || return 0
+  # cmdline 是 NUL 分隔的，grep 单行匹配照样命中；-a 防被当二进制跳过
+  if grep -qa "$key" "/proc/$pid/cmdline" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+  else
+    echo "· 跳过 run/$name：pid $pid 已不是该进程"
+  fi
+  return 0
+}
 
 sleep 2
-echo "已停止：qq=$(pgrep -c -x qq 2>/dev/null || echo 0) \
+pkill -9 -x qq 2>/dev/null
+for f in "$STACK_DIR"/run/*.pid; do kill_from_pidfile "$f"; done
+
+sleep 2
+echo "已停止：qq=$(pgrep -c -x qq 2>/dev/null || true) \
 snowluma=$(pgrep -f 'snowluma/nod[e]' 2>/dev/null | wc -l) \
 控制台=$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:${AGENT_PORT:-3081}/ 2>/dev/null)"
 echo "（虚拟屏 Xvfb/x11vnc 保留，想一起停：pkill -x Xvfb; pkill -x x11vnc; pkill -f websockify）"

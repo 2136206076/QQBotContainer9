@@ -10,6 +10,9 @@ export DISPLAY=${DISPLAY:-:1}
 export HOME=${QQ_HOME:-/root}
 RUN=${STACK_DIR:-/opt/qqstack}/run
 mkdir -p "$RUN" /tmp/.X11-unix
+SL_RESTARTED=0     # 1 = 本节刚重启过协议端，启动分支据此无条件拉起
+SL_STARTED=0       # 1 = 本节真发出了启动命令（没装好时为 0，避免谎报 ✓）
+AGENT_RESTARTED=0  # 1 = 本节刚杀过控制台，第 5 步必须强制重启（旧进程可能还占着端口）
 say() { echo "[start-all] $*"; }
 code() { curl -s -m 2 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null; }
 
@@ -42,10 +45,138 @@ pgrep -f "websockif[y]" >/dev/null 2>&1 || {
   echo $! >"$RUN/websockify.pid"; say "noVNC :${NOVNC_PORT:-6081}"; }
 
 # ---------- 2) 协议端 ----------
-pgrep -f "snowluma/nod[e]" >/dev/null 2>&1 || {
-  ( cd "${SNOWLUMA_DIR:-/opt/snowluma}" && ./node ./index.mjs >/tmp/snowluma.log 2>&1 </dev/null & )
-  say "SnowLuma（WebUI :${SLWEBUI_PORT:-5099}）"; }
-sleep 5
+# 账号识别是一次性的：SnowLuma 起来那一刻 QQ 还没扫码，holders 就是空的，之后即使登录
+# 成功也不会自动重扫 —— 表现就是 QQ 已登录、OneBot 却一直「未连接」。
+# 所以只要 QQ 已经在跑（说明不是首次拉起，多半是用户刚扫完码），就把协议端和控制台一起
+# 重启一次让它们重扫；QQ 与 Xvfb 不动，登录态不丢。
+#
+# 但「QQ 在跑 + 协议端在跑」不等于「没连上」：用户可能只是重开面板、或休眠后回来，
+# 这时 overview 里早就 connected+accountReady 都为真了，再重启协议端纯属打断正常工作
+# （OneBot 掉线、正在跑的对话全断）。所以先问一句 overview：确认已连接就跳过。
+# 查询失败（控制台没起 / 非 JSON / 字段缺失）一律保守重启 —— 宁可多重启一次，
+# 也别让「扫完码却一直未连接」这个原始 bug 复发。
+SL_DIR="${SNOWLUMA_DIR:-/opt/snowluma}"
+SL_PIDFILE="$RUN/snowluma.pid"
+
+# pidfile 只当线索：/proc/<pid>/cmdline 里必须真有 index.mjs 才认，防 PID 复用（与 stop-all.sh 同口径）
+sl_is_snowluma() {
+  local pid="${1:-}" line="" hit=""
+  [ -n "$pid" ] || return 1
+  [ "$pid" = "$$" ] && return 1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  while IFS= read -r -d '' line || [ -n "$line" ]; do
+    case "$line" in *index.mjs*) hit=1; break ;; esac
+  done < "/proc/$pid/cmdline" 2>/dev/null
+  [ -n "$hit" ]
+}
+
+# 判据双路：pgrep 优先（绝对路径启动后 argv 里必然带 snowluma/node）；
+# pidfile 兜底（老版本/手动用相对路径起的 ./node ./index.mjs，cmdline 里没有 snowluma/node，
+# pgrep 抓不到 —— 只看 pgrep 的话重启分支永不触发，下次启动还会起第二个实例撞端口）
+sl_pids() {
+  local out="" fpid=""
+  out="$(pgrep -f 'snowluma/nod[e]' 2>/dev/null | tr '\n' ' ' || true)"
+  if [ -f "$SL_PIDFILE" ]; then
+    fpid="$(tr -dc '0-9' < "$SL_PIDFILE" 2>/dev/null || true)"
+    if [ -n "$fpid" ] && sl_is_snowluma "$fpid"; then
+      case " $out " in *" $fpid "*) ;; *) out="$out$fpid " ;; esac
+    fi
+  fi
+  printf '%s' "$out"
+}
+
+# overview 已连上（connected 且 accountReady 都为真）→ 别打断
+# python 只留单行 -c：多行 -c 在 sh/bash 里转义太容易踩坑，出错就 return 1（= 保守重启）
+sl_already_connected() {
+  local ov="" st=""
+  ov="$(curl -s -m 3 "http://127.0.0.1:${AGENT_PORT:-3081}/api/overview" 2>/dev/null || true)"
+  [ -n "$ov" ] || return 1
+  st="$(printf '%s' "$ov" | python3 -c "import sys,json;d=json.load(sys.stdin);rt=d.get('runtime') or {};ob=rt.get('onebot') or {};c=rt.get('napcatConnected');c=ob.get('connected') if c is None else c;print('ready' if (c is True and ob.get('accountReady') is True) else 'notready')" 2>/dev/null || true)"
+  [ "$st" = "ready" ]
+}
+
+need_restart=0
+if pgrep -x qq >/dev/null 2>&1 && [ -n "$(sl_pids)" ]; then
+  need_restart=1
+  if sl_already_connected; then
+    need_restart=0
+    say "QQ 与协议端都在跑，overview 显示已连接（accountReady=true）→ 跳过重启，不打断"
+  fi
+fi
+
+if [ "$need_restart" = "1" ]; then
+  say "QQ 已在运行 → 重启协议端以重新识别账号（QQ 登录态保留）"
+  for x in $(sl_pids); do kill "$x" 2>/dev/null || true; done
+  # 控制台是 OneBot 客户端，一起重启可立刻重连，不用等 1s→30s 退避。
+  # pidfile 只当线索：/proc/<pid>/cmdline 里含 index.js / index.ts 才杀，防 PID 复用误杀无辜进程
+  AG_KILL_PID=""
+  if [ -f "$RUN/qqagent.pid" ]; then
+    ap="$(tr -dc '0-9' < "$RUN/qqagent.pid" 2>/dev/null || true)"
+    if [ -n "$ap" ] && grep -qa -e 'index\.js' -e 'index\.ts' "/proc/$ap/cmdline" 2>/dev/null; then
+      kill "$ap" 2>/dev/null || true
+      AG_KILL_PID="$ap"
+    elif [ -n "$ap" ]; then
+      say "· 控制台 pidfile 已失效（pid $ap 早已不是控制台进程），跳过 kill"
+    fi
+  fi
+  # 有界等待：最多 10s。以前只 sleep 2，而 SnowLuma 收到 SIGTERM 后可能 3s 才退，
+  # 2s 后 pgrep 仍命中 → 以为「还在跑」就跳过重启 → 旧进程随后真死，协议端与控制台双停
+  i=0
+  while [ "$i" -lt 10 ] && [ -n "$(sl_pids)" ]; do sleep 1; i=$((i+1)); done
+  if [ -n "$(sl_pids)" ]; then
+    say "⚠ 协议端 ${i}s 内没退干净，kill -9 兜底"
+    for x in $(sl_pids); do kill -9 "$x" 2>/dev/null || true; done
+    sleep 1
+  fi
+  # 被杀的旧控制台也要等它让出 3081，否则新实例绑不上端口（5s 后仍赖着就 -9）
+  if [ -n "$AG_KILL_PID" ]; then
+    i=0
+    while [ "$i" -lt 5 ] && [ -d "/proc/$AG_KILL_PID" ]; do sleep 1; i=$((i+1)); done
+    if [ -d "/proc/$AG_KILL_PID" ]; then
+      kill -9 "$AG_KILL_PID" 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  rm -f "$SL_PIDFILE" "$RUN/qqagent.pid"
+  SL_RESTARTED=1
+  # 第 5 步靠它强制重启控制台：旧进程就算还占着 3081，也必须重新拉起，
+  # 否则「端口被占 → 判为不用启动」会让控制台永久停着
+  AGENT_RESTARTED=1
+fi
+
+# 启动分支不看 pgrep：刚杀过就无条件拉起。否则「检查通过 → 进程正好死掉」这个时间窗
+# 会让协议端彻底没人管（pgrep 那一瞬间仍命中，于是整段被跳过）
+if [ "$SL_RESTARTED" = "1" ] || [ -z "$(sl_pids)" ]; then
+  if [ -x "$SL_DIR/node" ] && [ -f "$SL_DIR/index.mjs" ]; then
+    # 绝对路径启动：cmdline 里才会出现 .../snowluma/node，pgrep 判据才作数。
+    # 仍然 cd 到该目录、./index.mjs 不改 —— 它内部按相对路径找 native/、config/ 之类。
+    # exec 不能省：`cd && cmd &` 这种 and-list 后台化时 bash 可能再 fork 一层，
+    # 那样 $! 记的是个马甲 shell 的 pid、瞬间就退，pidfile 就废了（pidfile 兜底靠它）。
+    ( cd "$SL_DIR" && exec "$SL_DIR/node" ./index.mjs >/tmp/snowluma.log 2>&1 </dev/null &
+      echo $! >"$SL_PIDFILE" )
+    SL_STARTED=1
+  else
+    say "✗ 协议端没装好：$SL_DIR/node 或 $SL_DIR/index.mjs 不存在（先跑部署第 2 步）"
+  fi
+fi
+# 起没起来要验过再报，不许无条件 ✓：目录不存在 / 端口起不来都得如实说。
+# sleep 5 只在真发出启动命令时才等 —— 已连接跳过的快路径不该白等 5 秒。
+if [ "$SL_STARTED" = "1" ]; then
+  sleep 5
+  SL_OK=0
+  [ -n "$(sl_pids)" ] && SL_OK=1
+  if [ "$SL_OK" = "0" ]; then
+    case "$(code "http://127.0.0.1:${SLWEBUI_PORT:-5099}/")" in
+      000|"") : ;;
+      *)      SL_OK=1 ;;
+    esac
+  fi
+  if [ "$SL_OK" = "1" ]; then
+    say "SnowLuma（WebUI :${SLWEBUI_PORT:-5099}）"
+  else
+    say "✗ 协议端没起来，看 /tmp/snowluma.log"
+  fi
+fi
 
 # ---------- 3) 导出 resident dispatch 载荷 ----------
 # proot 下 memfd 版 dlopen 加载不了，slhook.c 的 dlopen 拦截器会把 /proc/self/fd/N
@@ -115,17 +246,20 @@ fi
 # 即 deploy.env 的 BOT_WS）。它在第 5 步先起、第 6 步才等 OneBot 就绪，中间连不上只会在
 # 日志里打 "等待重连 OneBot" 并按 1s→30s 退避重试（config/app.yaml 的 napcat.reconnect），
 # SnowLuma 起来后自动连上 —— 所以不需要把它挪到第 6 步之后（挪过去反而要多等一轮就绪）。
-if [ "$(code "http://127.0.0.1:${AGENT_PORT:-3081}/")" != "200" ]; then
+# 第 2 步刚杀过控制台（AGENT_RESTARTED=1）时不再看端口：旧进程可能还没退干净、3081 仍是
+# 200，按端口判就会跳过启动 → 控制台永久停。杀过就无条件重启。
+if [ "${AGENT_RESTARTED:-0}" = "1" ] || [ "$(code "http://127.0.0.1:${AGENT_PORT:-3081}/")" != "200" ]; then
   AGENT_HOME="${AGENT_DIR:-/opt/qqagent}"
   if [ -f "$AGENT_HOME/dist/src/index.js" ]; then
     # 顺手写 pidfile（run/ 下，和 Xvfb/x11vnc 一个惯例）：stop-all.sh 靠它精确点名，
-    # 比按命令行匹配可靠，也不用为了让 cmdline 里有绝对路径而改成绝对路径启动。
-    # 就算这条 pid 记的是外层 shell、node 是它 fork 出来的，stop-all 的 /proc 扫描照样兜得住
-    ( cd "$AGENT_HOME" && nohup node dist/src/index.js >/tmp/qqagent.log 2>&1 </dev/null &
+    # 比按命令行匹配可靠。exec 不能省 —— `cd && nohup node &` 这种 and-list 后台化时
+    # bash 可能再 fork 一层，$! 就成了马甲 shell 的 pid，第 2 步重启时按 cmdline 校验会被
+    # 判成「pidfile 已失效」而跳过 kill，旧控制台就留着占 3081 了。
+    ( cd "$AGENT_HOME" && exec nohup node dist/src/index.js >/tmp/qqagent.log 2>&1 </dev/null &
       echo $! >"$RUN/qqagent.pid" )
     say "控制台（node dist/src/index.js，:${AGENT_PORT:-3081}）"
   elif [ -f "$AGENT_HOME/src/index.ts" ] && [ -x "$AGENT_HOME/node_modules/.bin/tsx" ]; then
-    ( cd "$AGENT_HOME" && nohup ./node_modules/.bin/tsx src/index.ts >/tmp/qqagent.log 2>&1 </dev/null &
+    ( cd "$AGENT_HOME" && exec nohup ./node_modules/.bin/tsx src/index.ts >/tmp/qqagent.log 2>&1 </dev/null &
       echo $! >"$RUN/qqagent.pid" )
     say "控制台（tsx src/index.ts，:${AGENT_PORT:-3081}）"
   else
