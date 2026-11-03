@@ -1,50 +1,59 @@
 #!/bin/bash
-# 冻结 QQ 热更新（幂等，可反复执行）
-#   1) /etc/hosts 里把 qqpatch.gtimg.cn 指到 0.0.0.0（并保证 nsswitch 是 files 优先）
-#   2) 删掉已经偷偷下好的新版整包（不影响当前运行的版本）
+# 冻结 QQ 热更新 / 整包自动更新（幂等，可反复执行）
+#   手段 1（网络层）：/etc/hosts 把下列域名指到 0.0.0.0，并在 nsswitch 强制 files 优先，
+#           让 QQ 拉不到更新检查/更新包。覆盖：
+#             - proxy.hotupdate.qq.com        版本更新检查（"版本更新中"的源头）
+#             - dldir1.qq.com / dldir2.qq.com 整包客户端更新包下载（"版本更新中 3%"的下载源）
+#             - qqpatch.gtimg.cn             增量热更新 / 补丁 CDN
+#   手段 2（落盘层）：每次启动前清空 ~/.config/QQ/versions/（已下好的新版本下次启动才替换，先删掉）
+#   手段 3（保险）：把 versions/ 设为只读，下载器即便发起了请求也写不进盘 —— 下载即失败（fail-fast），
+#           不占存储；配合手段 1，绝大多数情况下连接在第一时间就被拒，连流量都几乎不耗。
 # 用法：bash scripts/freeze-hotupdate.sh
-#
-# 注意：即使 hosts 屏蔽没生效（proot 的解析器偶尔会绕开 /etc/hosts，见下面第 2 步的
-# 诊断输出），第 3 步「每次启动前清空 versions/」仍然能挡住升级 —— QQ 下载完新包之后
-# 是在**下次启动时**才替换的，我们在它启动前把目录删掉，替换就没有东西可换。
 set -u
-DOMAIN="qqpatch.gtimg.cn"
-HOSTS=/etc/hosts
-VCFG="${QQ_HOME:-/root}/.config/QQ/versions/config.json"
 
-# ---------- 1) 写 hosts（先规范化，避免历史 CRLF / 重复条目把条目变成无效行） ----------
+# 需要屏蔽的更新相关域名（QQ 整包更新 + 热更新）
+DOMAINS="proxy.hotupdate.qq.com dldir1.qq.com dldir2.qq.com qqpatch.gtimg.cn"
+HOSTS=/etc/hosts
+QQ_HOME_DIR="${QQ_HOME:-/root}"
+VERSIONS_DIR="$QQ_HOME_DIR/.config/QQ/versions"
+VCFG="$VERSIONS_DIR/config.json"
+
+# ---------- 1) 写 hosts（先规范化，避免历史 CRLF / 重复条目） ----------
+# 允许重写：先确保可写（上一轮可能被我们锁成只读）
+chmod u+w "$HOSTS" 2>/dev/null || true
 if [ -w "$HOSTS" ] || [ ! -e "$HOSTS" ]; then
   TMP=$(mktemp 2>/dev/null || echo /tmp/hosts.$$)
-  # tr -d '\r'：某些编辑器/老版本写出的 CRLF 会让 glibc 把主机名末尾的 \r 当成名字的一部分，
-  #            于是 "qqpatch.gtimg.cn" 查不到那条记录、照样走 DNS —— 这正是日志里
-  #            「hosts 已屏蔽」却「解析未生效」的头号嫌疑。
-  # grep -v：先摘掉旧的同名条目，避免越跑越长。
   if [ -f "$HOSTS" ]; then
-    tr -d '\r' <"$HOSTS" 2>/dev/null | grep -v "[[:space:]]${DOMAIN}[[:space:]]*$" >"$TMP" 2>/dev/null
+    # 先摘掉所有旧屏蔽条目（按域名），避免越跑越长；同时去 CRLF（否则主机名末尾 \r 会让记录失配）
+    tr -d '\r' <"$HOSTS" 2>/dev/null >"$TMP.orig" 2>/dev/null
+    cp "$TMP.orig" "$TMP" 2>/dev/null
+    for D in $DOMAINS; do
+      grep -v "[[:space:]]${D}[[:space:]]*$" "$TMP" >"$TMP.f" 2>/dev/null && mv "$TMP.f" "$TMP"
+    done
   else
     printf '127.0.0.1 localhost\n::1 localhost\n' >"$TMP"
   fi
-  # 万一原文件读不出/被清空，至少把 localhost 补回来，别把域名解析整个搞坏
   grep -q "localhost" "$TMP" 2>/dev/null || printf '127.0.0.1 localhost\n::1 localhost\n' >>"$TMP"
-  printf '0.0.0.0 %s\n' "$DOMAIN" >>"$TMP"
+  for D in $DOMAINS; do
+    printf '0.0.0.0 %s\n' "$D" >>"$TMP"
+  done
   if cat "$TMP" >"$HOSTS" 2>/dev/null; then
-    echo "[freeze] ✓ hosts 已指向 0.0.0.0（已去重/去 CR）"
+    echo "[freeze] ✓ hosts 已把更新域名指向 0.0.0.0（已去重/去 CR）"
   else
     echo "[freeze] ⚠ /etc/hosts 不可写（proot 把它 bind 成只读了？）"
     echo "         请改用宿主侧方案：在 Termux 里执行"
-    echo "         echo '0.0.0.0 $DOMAIN' >> \$PREFIX/etc/hosts"
+    for D in $DOMAINS; do echo "         echo '0.0.0.0 $D' >> \$PREFIX/etc/hosts"; done
   fi
-  rm -f "$TMP"
+  rm -f "$TMP" "$TMP.orig" "$TMP.f"
 else
   echo "[freeze] ⚠ /etc/hosts 不可写"
 fi
 
+# 写完即锁：运行时让 QQ 无法再删改 hosts 条目（防 QQ 像 Windows 版那样偷偷去掉屏蔽行）
+chmod a-w "$HOSTS" 2>/dev/null || true
+
 # ---------- 1.5) 保证 glibc 先查 /etc/hosts ----------
-# 没有 nsswitch.conf 时 glibc 的内置默认是 "dns [!UNAVAIL=return] files"：
-# DNS 优先且成功就返回，/etc/hosts 根本轮不到。补上这一行能让上面写的条目真正生效。
 if [ -f /etc/nsswitch.conf ]; then
-  # 注意要判「files 在最前」：`hosts: dns [!UNAVAIL=return] files` 里也有 files 字样，
-  # 但那是 DNS 优先，/etc/hosts 根本轮不到 —— 只判断"包含 files"会漏掉这种写法。
   if ! grep -qE '^hosts:[[:space:]]*files' /etc/nsswitch.conf 2>/dev/null; then
     sed -i 's/^hosts:.*/hosts:          files dns/' /etc/nsswitch.conf 2>/dev/null \
       && echo "[freeze] ✓ nsswitch 已改为 files 优先（原来是 DNS 优先）"
@@ -54,34 +63,37 @@ else
     && echo "[freeze] ✓ 补写 /etc/nsswitch.conf（hosts: files dns）"
 fi
 
-# ---------- 2) 验证 ----------
-R=""
-if command -v getent >/dev/null 2>&1; then
-  R=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')
-  [ -n "$R" ] || R=$(getent hosts "$DOMAIN" 2>/dev/null | head -1 | awk '{print $1}')
-fi
-case "$R" in
-  0.0.0.0 | 127.*) echo "[freeze] ✓ 解析已指向 ${R}（QQ 拉不到更新包）" ;;
-  "")
-    echo "[freeze] · 解析查询没结果（也算屏蔽成功：域名不可达）" ;;
-  *)
-    echo "[freeze] ⚠ 解析仍返回 $R（没走 /etc/hosts）"
-    echo "         ↳ 兜底：每次启动前都会清空 versions/，已下好的新版本不会被替换生效"
-    echo "         ↳ 诊断：nsswitch=[$(grep -E '^hosts:' /etc/nsswitch.conf 2>/dev/null)] hosts=[$(ls -l "$HOSTS" 2>/dev/null | awk '{print $1,$3,$5}')]"
-    echo "         ↳ 条目原文（出现 ^M 说明是 CRLF，主机名会被读成 qqpatch.gtimg.cn\\r 从而失配）："
-    echo "           [$(grep -m1 "$DOMAIN" "$HOSTS" 2>/dev/null | cat -A)]"
-    ;;
-esac
+# ---------- 2) 验证（逐域名） ----------
+for D in $DOMAINS; do
+  R=""
+  if command -v getent >/dev/null 2>&1; then
+    R=$(getent ahostsv4 "$D" 2>/dev/null | awk 'NR==1{print $1}')
+    [ -n "$R" ] || R=$(getent hosts "$D" 2>/dev/null | head -1 | awk '{print $1}')
+  fi
+  case "$R" in
+    0.0.0.0 | 127.*) echo "[freeze] ✓ $D -> ${R}（QQ 拉不到更新）" ;;
+    "") echo "[freeze] · $D 解析无结果（也算屏蔽成功：域名不可达）" ;;
+    *) echo "[freeze] ⚠ $D 仍解析到 $R（未走 /etc/hosts，靠 versions 只读兜底）" ;;
+  esac
+done
 
-# ---------- 3) 清掉已经下好的新版目录（形如 3.2.34-53644，zip 也一起清） ----------
-if [ -d "${QQ_HOME:-/root}/.config/QQ/versions" ]; then
+# ---------- 3) 清掉已经下好的新版目录（形如 3.2.34-53644） ----------
+# 先把 versions 设为可写（上一轮可能被我们钉成只读），清完再钉回只读
+mkdir -p "$VERSIONS_DIR" 2>/dev/null
+chmod u+w "$VERSIONS_DIR" 2>/dev/null || true
+if [ -d "$VERSIONS_DIR" ]; then
   N=0
-  for d in "${QQ_HOME:-/root}"/.config/QQ/versions/*-*; do
+  for d in "$VERSIONS_DIR"/*-*; do
     [ -e "$d" ] || continue
     rm -rf "$d" && N=$((N+1))
   done
   [ "$N" -gt 0 ] && echo "[freeze] 已清理 $N 个已下载的新版本目录" || echo "[freeze] 没有已下载的新版本"
 fi
+
+# ---------- 4) 钉死 versions/ 为只读：下载器落盘写不进，下载即失败（fail-fast） ----------
+chmod a-w "$VERSIONS_DIR" 2>/dev/null
+find "$VERSIONS_DIR" -type d -exec chmod a+x {} + 2>/dev/null   # 保留目录可遍历
+echo "[freeze] ✓ versions/ 已设为只读（更新包无法落盘，下载即失败，不占存储）"
 
 [ -f "$VCFG" ] && python3 -c "
 import json,sys
