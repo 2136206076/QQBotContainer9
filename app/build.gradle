@@ -24,8 +24,8 @@ android {
         // v1.3.3：修「一键部署走到 [10/10] 后日志停住、界面一直转圈」——
         //       proot 是 ptrace supervisor，会等所有子孙进程退出才返回，
         //       而 start-all.sh 拉起的全是常驻进程。改 launch（不等待）。
-        versionCode 9
-        versionName "1.3.5"
+        versionCode 10
+        versionName "1.3.6"
         // 只做 arm64：QQ / SnowLuma / hook 都是 aarch64
         ndk { abiFilters 'arm64-v8a' }
     }
